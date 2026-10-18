@@ -284,9 +284,12 @@ function renderTokenCard() {
   const u = chatUsage;
   if (!u || !(u.input + u.output)) return;
   const hit = cachePct(u);
-  const rows = [["Total", `${(u.input + u.output).toLocaleString()} tok`]];
+  // Total is the pill's number said again, so it is only worth a row when the
+  // split under it makes the sum new information. Without cache data the card
+  // is Input and Output, which is the whole story.
+  const rows = [];
   if (hit) {
-    rows.push(["Cache hit", `${hit}%`], ["Cached input", u.cached.toLocaleString()], ["Uncached input", (u.input - u.cached).toLocaleString()]);
+    rows.push(["Total", `${(u.input + u.output).toLocaleString()} tok`], ["Cache hit", `${hit}%`], ["Cached input", u.cached.toLocaleString()], ["Uncached input", (u.input - u.cached).toLocaleString()]);
   } else {
     rows.push(["Input", u.input.toLocaleString()]);
   }
@@ -301,6 +304,13 @@ function toggleTokenCard() {
   if (!chatUsage || !(chatUsage.input + chatUsage.output)) return;
   renderTokenCard();
   els.tokenCard.hidden = false;
+  // Placed from the pill's own rect: the pill sits at the right end of the
+  // header, so a fixed anchor opened the card far from what was clicked, and
+  // the header's height moves with the model line.
+  const rect = els.tokenLine.getBoundingClientRect();
+  const maxLeft = document.documentElement.clientWidth - els.tokenCard.offsetWidth - 8;
+  els.tokenCard.style.top = `${Math.round(rect.bottom) + 4}px`;
+  els.tokenCard.style.left = `${Math.max(8, Math.min(rect.left, maxLeft))}px`;
   els.tokenLine.setAttribute("aria-expanded", "true");
   document.addEventListener("mousedown", tokenCardOutside, true);
 }

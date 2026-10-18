@@ -2160,12 +2160,27 @@ async function main() {
       `usage: the saved chat stores the chat total and its cached slice (got ${JSON.stringify(savedUsage)})`);
     // The breakdown behind the token line: click opens it, an outside click closes it.
     check(await tokPanel.$eval("#token-card", (el) => el.hidden), "usage: breakdown card starts closed");
+    // A bare number beside a bordered chip reads as a label; the pill carries the
+    // same border as the model chip so it reads as a control before any click.
+    const pillBorder = await tokPanel.$eval("#token-line", (el) => getComputedStyle(el).borderTopColor);
+    check(pillBorder !== "transparent" && !/^rgba\(0, 0, 0, 0\)$/.test(pillBorder),
+      `usage: the pill is bordered at rest so it reads as a control (got "${pillBorder}")`);
     await tokPanel.click("#token-line");
     await tokPanel.waitForFunction(() => !document.querySelector("#token-card").hidden, null, { timeout: 5000 });
     const rows = await cardRows(tokPanel);
     const wantRows = [["Total", "2,490 tok"], ["Cache hit", "83%"], ["Cached input", "2,000"], ["Uncached input", "400"], ["Output", "90"]];
     check(JSON.stringify(rows) === JSON.stringify(wantRows), `usage: breakdown card shows the split (got ${JSON.stringify(rows)})`);
     check((await tokPanel.$eval("#token-line", (el) => el.getAttribute("aria-expanded"))) === "true", "usage: card reports its open state");
+    // The card opens under the pill that was clicked, not at the far edge of the header.
+    const anchor = await tokPanel.evaluate(() => {
+      const pill = document.querySelector("#token-line").getBoundingClientRect();
+      const card = document.querySelector("#token-card").getBoundingClientRect();
+      return { pl: pill.left, pr: pill.right, pb: pill.bottom, cl: card.left, cr: card.right, ct: card.top };
+    });
+    check(anchor.cr >= anchor.pl && anchor.cl <= anchor.pr,
+      `usage: the card opens under the pill clicked (pill ${Math.round(anchor.pl)}–${Math.round(anchor.pr)}, card ${Math.round(anchor.cl)}–${Math.round(anchor.cr)})`);
+    check(anchor.ct >= anchor.pb && anchor.ct - anchor.pb <= 12,
+      `usage: the card hangs just below the pill (pill bottom ${Math.round(anchor.pb)}, card top ${Math.round(anchor.ct)})`);
     await tokPanel.click("#composer");
     await tokPanel.waitForFunction(() => document.querySelector("#token-card").hidden, null, { timeout: 5000 });
     check((await tokPanel.$eval("#token-line", (el) => el.getAttribute("aria-expanded"))) === "false", "usage: outside click closes the card");
@@ -2189,6 +2204,28 @@ async function main() {
     await tokPanel.waitForFunction(() => !document.querySelector("#token-line").hidden, null, { timeout: 5000 });
     const tok3 = await tokenText(tokPanel);
     check(tok3 === "2.5k tok · cache 83%", `usage: reopening the saved chat restores its counts (got "${tok3}")`);
+    // A chat whose server reported no cache data: the pill says nothing about
+    // cache, and the card is Input and Output — no cache rows, no Total row
+    // repeating the pill's number.
+    await tokPanel.evaluate(async ([idxKey, prefix, item, body]) => {
+      await chrome.storage.local.set({ [idxKey]: { v: 1, currentId: null, items: [item] }, [prefix + item.id]: body });
+    }, [
+      SESSIONS_INDEX_KEY,
+      SESSION_BODY_PREFIX,
+      { id: "nocache", title: "No cache chat", createdAt: 2_000_000, updatedAt: 2_000_000, model: "mock-model", provider: "Mock", usage: { input: 1500, output: 200 } },
+      { id: "nocache", messages: [{ role: "user", content: "hi" }, { role: "assistant", content: "ok" }] },
+    ]);
+    await tokPanel.click("#history-btn");
+    await tokPanel.waitForSelector(".hist-item .hist-open", { timeout: 5000 });
+    await tokPanel.click(".hist-item .hist-open");
+    await tokPanel.waitForFunction(() => !document.querySelector("#token-line").hidden, null, { timeout: 5000 });
+    const tok4 = await tokenText(tokPanel);
+    check(tok4 === "1.7k tok", `usage: a chat with no cache data says nothing about cache (got "${tok4}")`);
+    await tokPanel.click("#token-line");
+    await tokPanel.waitForFunction(() => !document.querySelector("#token-card").hidden, null, { timeout: 5000 });
+    const rows4 = await cardRows(tokPanel);
+    check(JSON.stringify(rows4) === JSON.stringify([["Input", "1,500"], ["Output", "200"]]),
+      `usage: no cache data leaves no cache rows and no repeated Total (got ${JSON.stringify(rows4)})`);
     await tokPanel.close();
 
     // --- First-run / unconfigured (keep these LAST; they wipe the provider) ---
