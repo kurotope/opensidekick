@@ -31,6 +31,12 @@ export const PROMPT_HISTORY_MAX = 50;
 // switched while it was closed.
 export const SESSION_MODEL_KEY = "opensidekick.lastModel.v1";
 
+// chrome.storage.session key for the tab group the agent keeps its own tabs in:
+// { groupId, tabIds }. Persisted for the same reason the hot conversation copy is
+// — MV3 can terminate the worker mid-chat, and the next worker has to know which
+// tabs to close when the chat ends.
+export const SESSION_TABGROUP_KEY = "opensidekick.tabGroup.v1";
+
 // Chat history in chrome.storage.local: a small index of saved chats plus one
 // key per chat body, so each write (and each storage.onChanged broadcast)
 // covers one chat rather than all of them. The version sits before the id so

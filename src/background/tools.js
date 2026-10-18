@@ -2,7 +2,8 @@
 // active tab. Tool schemas are provider-agnostic (plain JSON Schema); the
 // provider layer converts them to the right wire format.
 
-import { MSG } from "../common/constants.js";
+import { MSG, SESSION_TABGROUP_KEY } from "../common/constants.js";
+import { GROUP_TITLE, GROUP_COLOR, closeList, restoreGroup } from "../common/tabgroups.js";
 import { readConsole, readNetwork } from "./cdp.js";
 
 export const TOOL_DEFS = [
@@ -392,6 +393,7 @@ async function openTab(ctx, url) {
   if (!/^https?:\/\//i.test(full) && !/^[a-z]+:\/\//i.test(full)) full = "https://" + full;
   const tab = await chrome.tabs.create({ url: full, active: true });
   ctx.setTabId(tab.id);
+  await groupTab(tab.id);
   await waitForLoad(tab.id);
   const updated = await chrome.tabs.get(tab.id);
   return { ok: true, tab_id: tab.id, url: updated.url, title: updated.title };
@@ -405,6 +407,95 @@ async function switchTab(ctx, tabId) {
     return { ok: true, tab_id: tabId, url: tab.url, title: tab.title };
   } catch {
     return { ok: false, error: `No tab with id ${tabId}.` };
+  }
+}
+
+// The tabs the agent opens live in one Chrome tab group tied to the live chat, so
+// the user can see what the agent opened and the tabs are gone when the chat ends.
+// The user's own tabs are never in the group: switch_tab moves focus, it does not
+// group. State lives in chrome.storage.session because MV3 can terminate the
+// worker mid-chat, and the next worker has to know which tabs to close.
+let agentGroup = null; // { groupId, tabIds } for the live chat
+let groupListenerBound = false;
+
+async function loadGroup() {
+  if (agentGroup) return agentGroup;
+  try {
+    const raw = await chrome.storage.session.get([SESSION_TABGROUP_KEY]);
+    agentGroup = restoreGroup(raw[SESSION_TABGROUP_KEY]);
+  } catch {
+    /* storage.session unavailable: group from scratch in this worker */
+  }
+  return agentGroup;
+}
+
+async function saveGroup() {
+  try {
+    if (agentGroup) await chrome.storage.session.set({ [SESSION_TABGROUP_KEY]: agentGroup });
+    else await chrome.storage.session.remove([SESSION_TABGROUP_KEY]);
+  } catch {
+    /* ignore: the in-memory list still drives this worker */
+  }
+}
+
+function bindGroupListeners() {
+  if (groupListenerBound) return;
+  groupListenerBound = true;
+  // Closing a group in the tab strip ungroups its tabs without closing them, so
+  // the tracked list survives and the next open_tab starts a fresh group. Bound
+  // lazily, the way cdp.js binds its listeners, so node can load this module.
+  chrome.tabGroups.onRemoved.addListener((g) => {
+    if (agentGroup && g.id === agentGroup.groupId) agentGroup = { groupId: null, tabIds: agentGroup.tabIds };
+  });
+}
+
+/** Put a tab the agent just opened into the chat's group. */
+export async function groupTab(tabId) {
+  bindGroupListeners();
+  const state = await loadGroup();
+  const next = state ? { groupId: state.groupId, tabIds: [...state.tabIds, tabId] } : { groupId: null, tabIds: [tabId] };
+  try {
+    if (next.groupId == null) {
+      next.groupId = await chrome.tabs.group({ tabIds: [tabId] });
+      await chrome.tabGroups.update(next.groupId, { title: GROUP_TITLE, color: GROUP_COLOR, collapsed: false });
+    } else {
+      await chrome.tabs.group({ tabIds: [tabId], groupId: next.groupId });
+    }
+  } catch {
+    // A tab that can't be grouped (another window, a restricted page) stays
+    // ungrouped: the run has to continue, and the tab is still tracked for closing.
+  }
+  agentGroup = next;
+  await saveGroup();
+}
+
+/** Close the tabs the agent opened for this chat. Called when the chat ends. */
+export async function closeAgentGroup() {
+  const state = await loadGroup();
+  agentGroup = null;
+  await saveGroup();
+  if (!state) return;
+  const ids = closeList(state.tabIds, await groupMembers(state.groupId));
+  for (const id of ids) {
+    try {
+      const tab = await chrome.tabs.get(id);
+      // Closing the last tab in a window closes the window, so leave it.
+      const inWindow = await chrome.tabs.query({ windowId: tab.windowId });
+      if (inWindow.length <= 1) continue;
+      await chrome.tabs.remove(id);
+    } catch {
+      /* the user closed it already */
+    }
+  }
+}
+
+async function groupMembers(groupId) {
+  if (groupId == null) return [];
+  try {
+    const tabs = await chrome.tabs.query({});
+    return tabs.filter((t) => t.groupId === groupId).map((t) => t.id);
+  } catch {
+    return [];
   }
 }
 

@@ -103,6 +103,9 @@ Smart checks disabled.
   assistant at, and to call the model provider / local endpoint you configure.
 - **`scripting` / `activeTab` / `tabs`**: to read the current page and perform
   actions across tabs on your behalf.
+- **`tabGroups`**: to keep the tabs the agent opened in one group, and close them
+  when the chat ends. Only tabs the agent opened are grouped and closed; your own
+  tabs are never grouped, and never closed by the extension.
 - **`storage`**: to save your providers, keys, preferences and, unless you turn it
   off, chat history locally.
 - **`sidePanel`**: to show the assistant UI.
