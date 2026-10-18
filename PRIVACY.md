@@ -32,6 +32,11 @@ backend server operated by the project and collects no analytics or telemetry.
   stops saving them; the chat that is open stays in memory until Chrome closes. History is never sent anywhere — but when you
   continue a saved chat, its earlier messages go to the provider you are using
   at that moment, which may not be the one that answered before.
+- **Context occupancy** (the percentage beside the model name) is kept in
+  `chrome.storage.session` as **counts only**: the sizes of the system prompt,
+  the tool definitions and the messages in the last request, and the prompt size
+  your provider reported for it. No text is stored in it, and session storage is
+  cleared when Chrome closes.
 
 ## Where data goes
 

@@ -5,6 +5,8 @@ import {
   estimateMessage,
   estimateMessages,
   estimateContext,
+  contextParts,
+  contextWindowOf,
   contextBudget,
   planCompaction,
   shrinkTail,
@@ -51,6 +53,21 @@ const tools = [{ name: "read_page", description: "d", parameters: { type: "objec
 const est = estimateContext({ system: sys, tools, messages: [user("A")] });
 ok(est > estimateMessages([user("A")]) + 1000, "estimateContext: system and tool defs count");
 ok(estimateContext({ system: "", tools: [], messages: [user("A"), asst("x")] }) === estimateMessages([user("A"), asst("x")]), "estimateContext: no system/tools is just the messages");
+
+// ---- contextParts: the split the occupancy card shows ----
+const parts = contextParts({ system: sys, tools, messages: [user("A")] });
+ok(parts.system + parts.tools + parts.messages === parts.total, "contextParts: the rows add up to the bar");
+ok(parts.total === est, "contextParts: the split is the same arithmetic estimateContext does");
+ok(parts.system === estimateTokens(sys) && parts.tools === estimateTokens(JSON.stringify(tools)), "contextParts: system and tool defs measured the way the request carries them");
+ok(contextParts({ system: "", tools: [], messages: [user("A")] }).tools === 0, "contextParts: no tool defs is a 0 row, not a missing one");
+ok(contextParts({ system: "", tools: [], messages: [] }).total === 0, "contextParts: an empty chat is 0");
+ok(contextParts({ system: "", tools: [], messages: [{ role: "user", content: "A", images: [1, 2] }] }).messages === estimateMessages([{ role: "user", content: "A", images: [1, 2] }]), "contextParts: screenshots count in the messages row");
+ok(contextParts({ system: "", tools: [], messages: [{ role: "user", content: "A", images: [1, 2] }] }).messages > estimateTokens("A") + 2 * IMAGE_TOKENS, "contextParts: a screenshot costs more than its text");
+
+// ---- window and budget ----
+ok(contextWindowOf({ settings: { contextWindow: 200000 } }) === 200000, "contextWindowOf: the user's window");
+ok(contextWindowOf({ settings: {} }) === 128000, "contextWindowOf: the default when unset");
+ok(contextWindowOf({}) === 128000, "contextWindowOf: no settings is the default");
 
 // ---- budget ----
 ok(contextBudget({ settings: { contextWindow: 128000, maxTokens: 4096 } }) === 128000 - 4096 - 4000, "contextBudget: window minus reply budget and reserve");

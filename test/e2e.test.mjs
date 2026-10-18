@@ -31,6 +31,7 @@ import {
   SESSION_CONVO_KEY,
 } from "../src/common/constants.js";
 import { GROUP_TITLE, GROUP_COLOR } from "../src/common/tabgroups.js";
+import { contextPercent } from "../src/common/usage.js";
 
 const EXT_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const IMG_PNG = fs.readFileSync(path.join(EXT_DIR, "icons/icon16.png")); // a real, tiny PNG
@@ -49,6 +50,11 @@ const check = (cond, msg) => {
   console.log((cond ? "ok  : " : "FAIL: ") + msg);
   if (!cond) failures++;
 };
+
+// The occupancy pill and card, read from a panel page. Used by the compaction
+// block (the bar is the arithmetic compaction acted on) and the usage block.
+const ctxText = (pg) => pg.$eval("#context-line", (el) => (el.hidden ? "" : el.textContent)).catch(() => "");
+const occNum = (s) => Number(String(s).replace(/[^\d]/g, ""));
 
 const TEST_PAGE = `<!doctype html><html><head><meta charset="utf-8"><title>Test Search</title></head>
 <body>
@@ -1683,9 +1689,19 @@ async function main() {
 
     await compSend("Run the long task: read the page three times.");
     const notesAfterTurn1 = await compPanel.$$eval(".note", (els) => els.map((e) => e.textContent)).catch(() => []);
+    const compBar1 = await ctxText(compPanel);
+    check(compBar1 !== "" && Number(compBar1.replace("%", "")) < 100,
+      `occupancy: the bar appears with the first request and reads inside the window (got "${compBar1}")`);
     await compSend("What did you find? " + "filler ".repeat(3400));
 
     const compNotes = await compPanel.$$eval(".note", (els) => els.map((e) => e.textContent)).catch(() => []);
+    const compBar2 = await ctxText(compPanel);
+    const pct2 = Number(compBar2.replace("%", ""));
+    // The guarantee compaction gives is that the request fits, not that the bar
+    // falls: the last user turn cannot be cut, and on a small window the system
+    // prompt and tool defs are most of the budget, so a bar that rises after a
+    // compaction is the fixed parts, not a meter that lies.
+    check(compBar2 !== "" && pct2 <= 100, `occupancy: the bar stays inside the budget after compaction (got "${compBar2}")`);
     const compAnswers = await compPanel.$$eval(".msg.assistant", (els) => els.map((e) => e.textContent)).catch(() => []);
     check(!notesAfterTurn1.some((t) => /Compacted/.test(t)), `compaction: nothing compacted while the first turn was inside the window (${notesAfterTurn1.length} notes)`);
     check(compNotes.some((t) => /Compacted the \d+ oldest messages into a summary/.test(t)), `compaction: the chat says what was compacted (${JSON.stringify(compNotes.filter((t) => /Compacted/.test(t)))})`);
@@ -2448,7 +2464,10 @@ async function main() {
     const tokenText = (pg) => pg.$eval("#token-line", (el) => (el.hidden ? "" : el.textContent)).catch(() => "");
     const cardRows = (pg) =>
       pg.$$eval("#token-card .tk-row", (rows) => rows.map((r) => [r.querySelector(".tk-label").textContent, r.querySelector(".tk-val").textContent]));
+    const ctxRows = (pg) =>
+      pg.$$eval("#context-card .tk-row", (rows) => rows.map((r) => [r.querySelector(".tk-label").textContent, r.querySelector(".tk-val").textContent]));
     check((await tokenText(tokPanel)) === "", "usage: a fresh chat shows no counts");
+    check((await ctxText(tokPanel)) === "", "occupancy: a fresh chat shows no percentage");
     const t1 = await panelSend(tokPanel, "The magic word is plum. Acknowledge.", 0);
     check(t1 > 0, "usage: first turn completed through the composer");
     await tokPanel.waitForFunction(() => !document.querySelector("#token-line").hidden, null, { timeout: 5000 });
@@ -2457,6 +2476,45 @@ async function main() {
     const t2 = await panelSend(tokPanel, "What is the magic word?", t1);
     const tok2 = await tokenText(tokPanel);
     check(tok2 === "2.5k tok · cache 83%", `usage: counts add up across calls in one chat (got "${tok2}")`);
+    // Occupancy: how full the window is right now, as the compaction logic
+    // measures it. Its own pill, because a sum over calls (the cost pill) and a
+    // snapshot of the window answer different questions, and the snapshot is the
+    // one that warns before compaction.
+    await tokPanel.waitForFunction(() => !document.querySelector("#context-line").hidden, null, { timeout: 5000 });
+    const ctx1 = await ctxText(tokPanel);
+    check(/^\d+(\.\d+)?%$/.test(ctx1), `occupancy: the pill is a percentage (got "${ctx1}")`);
+    await tokPanel.click("#context-line");
+    await tokPanel.waitForFunction(() => !document.querySelector("#context-card").hidden, null, { timeout: 5000 });
+    const crows = await ctxRows(tokPanel);
+    const clabels = crows.map((r) => r[0]);
+    check(JSON.stringify(clabels) === JSON.stringify(["Used", "Window", "System prompt", "Tool definitions", "Messages", "Server's count"]),
+      `occupancy: the card names the parts of the request (got ${JSON.stringify(clabels)})`);
+    const used = occNum(crows[0][1].split("/")[0]);
+    const budget = occNum(crows[0][1].split("/")[1]);
+    check(used === occNum(crows[2][1]) + occNum(crows[3][1]) + occNum(crows[4][1]),
+      `occupancy: the rows add up to the bar (used ${used}, parts ${crows[2][1]} + ${crows[3][1]} + ${crows[4][1]})`);
+    check(ctx1 === `${contextPercent(used, budget)}%`, `occupancy: the pill is the bar's share of the budget (pill "${ctx1}", used ${used}, budget ${budget})`);
+    check(budget === 128000 - 1024 - 4000, `occupancy: the denominator is the budget compaction fires at, not the window (budget ${budget})`);
+    check(crows[5][1] === "1,200", `occupancy: the server's count is the prompt the mock reported (got "${crows[5][1]}")`);
+    const barFill = await tokPanel.$eval("#context-card .ctx-fill", (el) => el.style.width);
+    check(Math.abs(Number(barFill.replace("%", "")) - (used * 100) / budget) <= 1,
+      `occupancy: the bar's fill matches the share (fill "${barFill}", share ${((used * 100) / budget).toFixed(2)})`);
+    const ctxAnchor = await tokPanel.evaluate(() => {
+      const pill = document.querySelector("#context-line").getBoundingClientRect();
+      const card = document.querySelector("#context-card").getBoundingClientRect();
+      return { pl: pill.left, pr: pill.right, pb: pill.bottom, cl: card.left, cr: card.right, ct: card.top };
+    });
+    check(ctxAnchor.cr >= ctxAnchor.pl && ctxAnchor.cl <= ctxAnchor.pr,
+      `occupancy: the card opens under the pill clicked (pill ${Math.round(ctxAnchor.pl)}–${Math.round(ctxAnchor.pr)}, card ${Math.round(ctxAnchor.cl)}–${Math.round(ctxAnchor.cr)})`);
+    await tokPanel.click("#composer");
+    await tokPanel.waitForFunction(() => document.querySelector("#context-card").hidden, null, { timeout: 5000 });
+    check((await tokPanel.$eval("#context-line", (el) => el.getAttribute("aria-expanded"))) === "false", "occupancy: outside click closes the card");
+    // A panel reload brings the bar back: the snapshot is live chat state, kept
+    // with the conversation, not a number the panel re-estimates on its own.
+    await tokPanel.reload();
+    await tokPanel.waitForTimeout(600);
+    const ctxReload = await ctxText(tokPanel);
+    check(ctxReload === ctx1, `occupancy: a panel reload restores the bar (got "${ctxReload}", was "${ctx1}")`);
     const usageHit = await waitHistory((h) => h.index?.items?.[0]?.usage?.input === 2400);
     const savedUsage = usageHit.index?.items?.[0]?.usage;
     check(savedUsage && savedUsage.input === 2400 && savedUsage.output === 90 && savedUsage.cached === 2000,
@@ -2500,6 +2558,7 @@ async function main() {
     await tokPanel.click("#new-chat");
     await tokPanel.waitForTimeout(300);
     check((await tokenText(tokPanel)) === "", "usage: New chat clears the count");
+    check((await ctxText(tokPanel)) === "", "occupancy: New chat clears the bar");
     // Reopening the saved chat brings its counts back.
     await tokPanel.click("#history-btn");
     await tokPanel.waitForSelector(".hist-item .hist-open", { timeout: 5000 });
@@ -2507,6 +2566,10 @@ async function main() {
     await tokPanel.waitForFunction(() => !document.querySelector("#token-line").hidden, null, { timeout: 5000 });
     const tok3 = await tokenText(tokPanel);
     check(tok3 === "2.5k tok · cache 83%", `usage: reopening the saved chat restores its counts (got "${tok3}")`);
+    // The bar is not restored from disk: a chat opened from History has no record
+    // of what its last request carried, so the pill stays hidden until the next
+    // request measures it.
+    check((await ctxText(tokPanel)) === "", "occupancy: a chat opened from History has no bar until the next request");
     // A chat whose server reported no cache data: the pill says nothing about
     // cache, and the card is Input and Output — no cache rows, no Total row
     // repeating the pill's number.

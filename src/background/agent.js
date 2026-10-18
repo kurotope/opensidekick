@@ -12,7 +12,8 @@ import { resolveSource, classifyInjection, classifyAction, createBreaker, thresh
 import {
   SUMMARY_MAX_TOKENS,
   contextBudget,
-  estimateContext,
+  contextParts,
+  contextWindowOf,
   estimateMessages,
   planCompaction,
   shrinkTail,
@@ -165,12 +166,23 @@ export async function runAgent(deps) {
     }
   };
 
+  // The occupancy reading for the panel: the three parts a request carries,
+  // measured after any compaction, so the bar tracks the request the model
+  // actually got, not the one that was about to be refused.
+  const emitContext = () => {
+    const parts = contextParts({ system: SYSTEM_PROMPT + identity.main, tools, messages: conversation });
+    emit({ kind: "context", ...parts, budget: contextBudget(config), window: contextWindowOf(config) });
+  };
+
   // Called before every model request: the chars/4 estimate is a heuristic, so
   // this is the pre-emptive half of compaction — the provider's own refusal is
   // the reactive half, in the catch below.
   const ensureContext = async () => {
     const budget = contextBudget(config);
-    if (estimateContext({ system: SYSTEM_PROMPT + identity.main, tools, messages: conversation }) <= budget) return;
+    if (contextParts({ system: SYSTEM_PROMPT + identity.main, tools, messages: conversation }).total <= budget) {
+      emitContext();
+      return;
+    }
     const cut = planCompaction(conversation, tailBudget);
     // A cut of 1 would drop only the previous summary and re-summarise it: no
     // progress, and a paid call for it. Shorten the biggest tool results instead.
@@ -190,11 +202,13 @@ export async function runAgent(deps) {
           sensitive: false,
         });
       }
+      emitContext();
       return;
     }
     compactedThisStep = true;
     const r = await compactConversation({ conversation, provider, config, signal, tailBudget });
     if (r) compactNote(r);
+    emitContext();
   };
 
   // The plan call sends the whole conversation, so compact before it too.

@@ -107,6 +107,8 @@ function loadLive() {
                 id: meta.id,
                 sensitive: !!meta.sensitive,
                 usage: cleanUsage(meta.usage),
+                ...(meta.context && typeof meta.context === "object" ? { context: meta.context } : {}),
+                ...(Number.isFinite(meta.prompt) && meta.prompt > 0 ? { prompt: meta.prompt } : {}),
                 ...(meta.trimmed ? { trimmed: true } : {}),
                 ...(meta.compacted ? { compacted: true } : {}),
               }
@@ -142,6 +144,8 @@ async function writeHot() {
     id: session.id,
     sensitive: session.sensitive,
     usage: session.usage,
+    ...(session.context ? { context: session.context } : {}),
+    ...(session.prompt ? { prompt: session.prompt } : {}),
     ...(session.trimmed ? { trimmed: true } : {}),
     ...(session.compacted ? { compacted: true } : {}),
   };
@@ -503,6 +507,11 @@ async function handleGetState() {
     trimmed: !!(session && session.trimmed),
     compacted: !!(session && session.compacted),
     usage: session ? cleanUsage(session.usage) : null,
+    // The occupancy snapshot is live-chat state, not saved-chat state: opening an
+    // old chat has no idea what its last request carried, so the bar stays hidden
+    // until the next request measures it.
+    context: session ? session.context || null : null,
+    prompt: session ? session.prompt || null : null,
   };
 }
 
@@ -642,7 +651,15 @@ async function handleRunTask(msg) {
   // running total as they arrive: the number on screen and in the saved chat is
   // the whole chat, not the last turn.
   const runEmit = (ev) => {
-    if (ev.kind === "usage") runSession.usage = addUsage(runSession.usage, ev.usage);
+    if (ev.kind === "usage") {
+      runSession.usage = addUsage(runSession.usage, ev.usage);
+      // The prompt the server just processed, for the occupancy card's "server's
+      // count" row: the estimate and the number the provider billed, side by side.
+      runSession.prompt = ev.usage.input;
+    }
+    // The occupancy snapshot is the state of the request the model got, so the
+    // latest one wins; a panel reload restores the bar from it.
+    if (ev.kind === "context") runSession.context = { system: ev.system, tools: ev.tools, messages: ev.messages, total: ev.total, budget: ev.budget, window: ev.window };
     emit(ev);
   };
 

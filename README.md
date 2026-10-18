@@ -110,6 +110,15 @@ genuinely agentic, and usable with any LLM — including fully local models.**
   come from your provider's response and stay on your device; a server that
   reports no usage shows nothing, one that reports no cache data says nothing
   about cache, and a partial cache hit is never rounded up to 100%.
+- **Context occupancy** — a second number beside the model name: how full the
+  model's window is right now, as a share of what the conversation is allowed to
+  occupy. Click it for the split — system prompt, tool definitions, messages —
+  and the prompt size your provider reported for the last call, so the estimate
+  and the number it billed sit side by side. The same estimate drives context
+  compaction, which replaces the oldest messages with a summary when the chat
+  crosses the budget, so the bar and the compaction can never disagree. The
+  estimate is chars/4, computed on your device from text you are already
+  sending; nothing is measured in the cloud.
 - **Scheduled tasks** — run a prompt on a repeating schedule (hourly / daily /
   weekly, or any interval) while Chrome is open; the result arrives as a
   notification. Unattended runs act without asking and decline purchases/deletions.
