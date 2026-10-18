@@ -18,12 +18,11 @@ backend server operated by the project and collects no analytics or telemetry.
   `chrome.storage.local`: your 20 most recent chats, each with a title, when it
   was started and last used, the model id and provider name that answered, the
   token counts your provider reported for it (including how many of the input
-  tokens it read from, or wrote into, its own cache), and the text of your messages and
-  the assistant's replies (up to about 200 KB per
-  chat; the oldest messages are dropped first, and a single very long message
-  is shortened). Your messages are kept as you
-  typed them, so a password or key you paste into one is saved with the chat:
-  delete that chat afterwards. It does not store screenshots, the page text or
+  tokens it read from, or wrote into, its own cache), and the text of your
+  messages and the assistant's replies (up to about 200 KB per chat; the
+  oldest messages are dropped first, and a single very long message is
+  shortened). Your messages are kept as you typed them, so a password or key
+  you paste into one is saved with the chat: delete that chat afterwards. It does not store screenshots, the page text or
   element maps the assistant read, or the actions it took. A chat in which the
   assistant reads (including by running JavaScript on the page), opens,
   switches to or screenshots a site on the built-in sensitive-site list (banks,

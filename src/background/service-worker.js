@@ -37,7 +37,7 @@ import {
   emptyIndex,
 } from "./sessions.js";
 import { validateImages, ATTACH_NOTES } from "../common/attachments.js";
-import { cleanUsage } from "../common/usage.js";
+import { cleanUsage, addUsage } from "../common/usage.js";
 import { resolveSource, isNoteworthyChange, featureEnabled, thresholdFor } from "./decisions.js";
 import { runAgent } from "./agent.js";
 import { detachAll } from "./cdp.js";
@@ -634,18 +634,15 @@ async function handleRunTask(msg) {
   const runSession = session;
   const runConversation = conversation;
   runSession.usage = cleanUsage(runSession.usage) || { input: 0, output: 0, cached: 0, write: 0 };
-  const saveMeta = { model: config.activeModel, provider: provider.name, usage: runSession.usage };
+  // Read at save time, not captured at the run's start: addUsage returns a new
+  // object for each call, so a captured reference would save the first call's
+  // counts and not the chat's total.
+  const saveMeta = () => ({ model: config.activeModel, provider: provider.name, usage: runSession.usage });
   // Each provider call reports its own token counts, so they add to the chat's
   // running total as they arrive: the number on screen and in the saved chat is
-  // the whole chat, not the last turn. cleanUsage drops a zero cache field, so
-  // the running total has to carry its own.
+  // the whole chat, not the last turn.
   const runEmit = (ev) => {
-    if (ev.kind === "usage") {
-      runSession.usage.input += ev.input;
-      runSession.usage.output += ev.output;
-      runSession.usage.cached = (runSession.usage.cached || 0) + (ev.cached || 0);
-      runSession.usage.write = (runSession.usage.write || 0) + (ev.write || 0);
-    }
+    if (ev.kind === "usage") runSession.usage = addUsage(runSession.usage, ev.usage);
     emit(ev);
   };
 
@@ -680,7 +677,7 @@ async function handleRunTask(msg) {
       // Detach the debugger (removes the "debugging this browser" banner).
       await detachAll().catch(() => {});
       // Before idle, so whoever waits for idle sees the saved chat.
-      await saveRun(runSession, runConversation, saveMeta).catch(() => {});
+      await saveRun(runSession, runConversation, saveMeta()).catch(() => {});
       currentRun = null;
       if (!recording) stopKeepAlive(); // an active recording still needs it
       emit({ kind: "idle" });

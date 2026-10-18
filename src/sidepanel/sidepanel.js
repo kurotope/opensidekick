@@ -18,7 +18,7 @@ import { matchPrompts, isSlashQuery } from "../common/prompts.js";
 import { classifyFile, targetSize, acceptImage, ATTACH_NOTES } from "../common/attachments.js";
 import { escapeHtml } from "../common/escape.js";
 import { markdownToHtml, createStreamingRenderer, CODE_CLASS, setHighlighter } from "../common/markdown.js";
-import { cacheHitText, uncachedInput } from "../common/usage.js";
+import { cacheHitText, uncachedInput, addUsage } from "../common/usage.js";
 import { relativeTime } from "../background/sessions.js";
 
 // Prism loads as scripts in sidepanel.html, so it is a global by the time this
@@ -783,12 +783,7 @@ function handleEvent(ev) {
       endAssistant(ev.content);
       break;
     case "usage":
-      chatUsage = {
-        input: (chatUsage ? chatUsage.input : 0) + ev.input,
-        output: (chatUsage ? chatUsage.output : 0) + ev.output,
-        cached: (chatUsage && chatUsage.cached ? chatUsage.cached : 0) + (ev.cached || 0),
-        write: (chatUsage && chatUsage.write ? chatUsage.write : 0) + (ev.write || 0),
-      };
+      chatUsage = addUsage(chatUsage, ev.usage);
       renderTokenLine();
       break;
     case "tool_start":

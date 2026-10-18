@@ -2,6 +2,11 @@
 // out of three different shapes: OpenAI's usage chunk, Ollama's field names,
 // Anthropic's split across message_start and message_delta. Mock servers say it
 // each way, and the normalized result is checked.
+//
+// The provider layer only reads the names; the rules for what counts as a token
+// and how the cache slices are clamped live in usage.js, so a server reporting
+// no cache data leaves the cache fields out of the shape, and the expectations
+// here say so.
 
 import http from "node:http";
 import { callModel } from "../src/background/providers.js";
@@ -49,7 +54,7 @@ const openai = await serve((o, res) =>
   sse(res, [...say("hello"), { usage: { prompt_tokens: 120, completion_tokens: 34 } }]),
 );
 const r1 = await callModel(openaiFor(openai), { model: "m", messages: [{ role: "user", content: "hi" }] });
-eq(r1.usage, { input: 120, output: 34, cached: 0, write: 0 }, "openai: prompt/completion tokens normalized");
+eq(r1.usage, { input: 120, output: 34 }, "openai: prompt/completion tokens normalized");
 eq(r1.content, "hello", "openai: text still streamed");
 eq(openai.bodies[0].stream_options, { include_usage: true }, "openai: usage asked for in the request");
 
@@ -58,7 +63,7 @@ const ollama = await serve((o, res) =>
   sse(res, [...say("local"), { usage: { prompt_eval_count: 800, eval_count: 40 } }]),
 );
 const r2 = await callModel(openaiFor(ollama), { model: "qwen3-vl:8b-instruct", messages: [{ role: "user", content: "hi" }] });
-eq(r2.usage, { input: 800, output: 40, cached: 0, write: 0 }, "ollama: eval-count fields normalized to input/output");
+eq(r2.usage, { input: 800, output: 40 }, "ollama: eval-count fields normalized to input/output");
 
 // ---- Anthropic: input in message_start, output cumulative in message_delta ----
 const anthropic = await serve((o, res) =>
@@ -87,21 +92,21 @@ const hitSrv = await serve((o, res) =>
   sse(res, [...say("hit"), { usage: { prompt_tokens: 600, completion_tokens: 12, prompt_cache_hit_tokens: 512, prompt_cache_miss_tokens: 88 } }]),
 );
 const r8 = await callModel(openaiFor(hitSrv), { model: "m", messages: [{ role: "user", content: "hi" }] });
-eq(r8.usage, { input: 600, output: 12, cached: 512, write: 0 }, "top-level prompt_cache_hit_tokens read (DeepSeek/Groq shape)");
+eq(r8.usage, { input: 600, output: 12, cached: 512 }, "top-level prompt_cache_hit_tokens read (DeepSeek/Groq shape)");
 
 // Kimi documents the hit count as a top-level cached_tokens on the final chunk.
 const kimiSrv = await serve((o, res) =>
   sse(res, [...say("kimi"), { usage: { prompt_tokens: 800, completion_tokens: 30, cached_tokens: 640 } }]),
 );
 const r8b = await callModel(openaiFor(kimiSrv), { model: "m", messages: [{ role: "user", content: "hi" }] });
-eq(r8b.usage, { input: 800, output: 30, cached: 640, write: 0 }, "top-level cached_tokens read (Kimi shape)");
+eq(r8b.usage, { input: 800, output: 30, cached: 640 }, "top-level cached_tokens read (Kimi shape)");
 
 // A server claiming more cached than input: a slice can't exceed the whole.
 const overSrv = await serve((o, res) =>
   sse(res, [...say("over"), { usage: { prompt_tokens: 100, completion_tokens: 5, prompt_tokens_details: { cached_tokens: 400 } } }]),
 );
 const r9 = await callModel(openaiFor(overSrv), { model: "m", messages: [{ role: "user", content: "hi" }] });
-eq(r9.usage, { input: 100, output: 5, cached: 100, write: 0 }, "cached clamped to input");
+eq(r9.usage, { input: 100, output: 5, cached: 100 }, "cached clamped to input");
 
 // Reads and writes are disjoint parts of input, so the write is clamped to what
 // the cached slice leaves.
@@ -121,7 +126,7 @@ const writeSrv = await serve((o, res) =>
   ]),
 );
 const r10 = await callModel(anthropicFor(writeSrv), { model: "claude", maxTokens: 100, messages: [{ role: "user", content: "hi" }] });
-eq(r10.usage, { input: 1000, output: 5, cached: 0, write: 100 }, "cache write counted into input, kept as its own slice, not as a cache hit");
+eq(r10.usage, { input: 1000, output: 5, write: 100 }, "cache write counted into input, kept as its own slice, not as a cache hit");
 
 // Anthropic reports cache fields in message_delta too, so the merge has to keep
 // the larger snapshot rather than the last one.
@@ -133,7 +138,7 @@ const lateSrv = await serve((o, res) =>
   ]),
 );
 const r11 = await callModel(anthropicFor(lateSrv), { model: "claude", maxTokens: 100, messages: [{ role: "user", content: "hi" }] });
-eq(r11.usage, { input: 900, output: 3, cached: 800, write: 0 }, "cache read in message_delta merges as the larger snapshot");
+eq(r11.usage, { input: 900, output: 3, cached: 800 }, "cache read in message_delta merges as the larger snapshot");
 
 // ---- Nothing reported: null, not zeros, so the UI says nothing ----
 const silent = await serve((o, res) => sse(res, say("no counts")));
