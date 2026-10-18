@@ -12,6 +12,7 @@ import {
   SESSIONS_MAX,
   SENSITIVE_NOTE,
   TRIMMED_NOTE,
+  COMPACTED_NOTE,
 } from "../common/constants.js";
 import { matchPrompts, isSlashQuery } from "../common/prompts.js";
 import { relativeTime } from "../background/sessions.js";
@@ -157,6 +158,7 @@ function applyState(state) {
   if (state.history && state.history.length && !els.messages.querySelector(".msg")) {
     els.empty.hidden = true;
     if (state.trimmed) addNote(TRIMMED_NOTE, "dot");
+    if (state.compacted) addNote(COMPACTED_NOTE, "dot");
     renderHistory(state.history);
     if (state.sensitive) addNote(SENSITIVE_NOTE, "shield");
     scroll();
@@ -518,6 +520,9 @@ function handleEvent(ev) {
     case "mcp_connected":
       addNote(`Connected to MCP server “${ev.server}” (${ev.count} tool${ev.count === 1 ? "" : "s"})`, "dot");
       break;
+    case "compacted":
+      addCompaction(ev);
+      break;
     case "warning":
       addWarning(ev.text);
       break;
@@ -743,6 +748,38 @@ function addNote(text, icon, action) {
   }
   els.messages.appendChild(el);
   scroll();
+}
+
+// Compaction: one quiet line saying what was folded away, with the summary
+// readable — a summary the user can't check is a summary they can't trust.
+function addCompaction(ev) {
+  const text =
+    ev.dropped > 0
+      ? `Compacted the ${ev.dropped} oldest messages into a summary to stay within the model's context window. Kept the last ${ev.kept} message${ev.kept === 1 ? "" : "s"} verbatim${ev.shrunk ? `, and shortened ${ev.shrunk} large tool result${ev.shrunk === 1 ? "" : "s"}` : ""}.`
+      : `Compacted again: shortened ${ev.shrunk} large tool result${ev.shrunk === 1 ? "" : "s"} to stay within the model's context window.`;
+  const box = document.createElement("details");
+  box.className = "compacted-summary";
+  const head = document.createElement("summary");
+  head.textContent = "Summary of the compacted messages";
+  const body = document.createElement("div");
+  body.innerHTML = renderMarkdown(ev.summary || "");
+  box.append(head, body);
+  addNote(
+    text,
+    "dot",
+    ev.summary
+      ? {
+          label: "Show summary",
+          // One box per compaction: appending the same node moves it, and the
+          // button retires once the summary is on screen.
+          onClick: (e) => {
+            els.messages.appendChild(box);
+            e.target.hidden = true;
+            scroll();
+          },
+        }
+      : null,
+  );
 }
 
 function showPlan(req) {

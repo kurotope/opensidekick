@@ -3,12 +3,22 @@
 // stops calling tools, calls `finish`, hits the step cap, or is aborted.
 
 import { callModel } from "./providers.js";
-import { TOOL_DEFS, executeTool, setOverlay } from "./tools.js";
+import { TOOL_DEFS, executeTool, setOverlay, summarizeResult } from "./tools.js";
 import { evaluate, MUTATING_TOOLS, PAGE_READ_TOOLS, originOf, isSensitive } from "./permissions.js";
 import { detectInjection, isSensitiveActionText, looksLikeSecret, INJECTION_NOTE } from "./safety.js";
 import { parsePlan, planToText, hostFromDomain } from "./plan.js";
 import { connectServer, listTools, callTool, closeSession, mcpToolName, flattenMcpContent } from "./mcp.js";
 import { resolveSource, classifyInjection, classifyAction, createBreaker, thresholdFor, featureEnabled } from "./decisions.js";
+import {
+  SUMMARY_MAX_TOKENS,
+  contextBudget,
+  estimateContext,
+  estimateMessages,
+  planCompaction,
+  shrinkTail,
+  isContextOverflow,
+  compactConversation,
+} from "./compact.js";
 
 const SYSTEM_PROMPT = `You are OpenSidekick, a browser assistant that can read and act on the web page the user is looking at, on their behalf, using tools.
 
@@ -139,6 +149,54 @@ export async function runAgent(deps) {
     },
   };
 
+  // Context compaction. The window is the user's setting; the budget is what the
+  // conversation may occupy once the reply budget and headroom are taken out,
+  // and the kept tail has to fit inside that minus the summary's own budget.
+  const tailBudget = contextBudget(config) - SUMMARY_MAX_TOKENS;
+  let compactedThisStep = false;
+
+  const compactNote = (r) => {
+    emit({ kind: "compacted", ...r });
+    if (r.fallback) {
+      emit({ kind: "warning", text: "The model couldn't summarise the older messages, so they were dropped as a plain list." });
+    }
+  };
+
+  // Called before every model request: the chars/4 estimate is a heuristic, so
+  // this is the pre-emptive half of compaction — the provider's own refusal is
+  // the reactive half, in the catch below.
+  const ensureContext = async () => {
+    const budget = contextBudget(config);
+    if (estimateContext({ system: SYSTEM_PROMPT + identity.main, tools, messages: conversation }) <= budget) return;
+    const cut = planCompaction(conversation, tailBudget);
+    // A cut of 1 would drop only the previous summary and re-summarise it: no
+    // progress, and a paid call for it. Shorten the biggest tool results instead.
+    if (cut <= 1) {
+      const before = estimateMessages(conversation);
+      const shrunk = shrinkTail(conversation.slice(Math.max(cut, 1)), tailBudget);
+      if (shrunk) {
+        compactedThisStep = true;
+        compactNote({
+          dropped: 0,
+          kept: conversation.length - 1,
+          shrunk,
+          tokensBefore: before,
+          tokensAfter: estimateMessages(conversation),
+          summary: "",
+          fallback: false,
+          sensitive: false,
+        });
+      }
+      return;
+    }
+    compactedThisStep = true;
+    const r = await compactConversation({ conversation, provider, config, signal, tailBudget });
+    if (r) compactNote(r);
+  };
+
+  // The plan call sends the whole conversation, so compact before it too.
+  await ensureContext();
+
   // Plan-approval mode: propose a plan and wait for approval before acting.
   if (config.settings.autonomy === "plan" && requestPlanApproval) {
     emit({ kind: "planning" });
@@ -182,10 +240,12 @@ export async function runAgent(deps) {
       return;
     }
 
+    compactedThisStep = false;
+    await ensureContext();
+
     emit({ kind: "assistant_start" });
-    let result;
-    try {
-      result = await callModel(provider, {
+    const callOnce = () =>
+      callModel(provider, {
         model: config.activeModel,
         system: SYSTEM_PROMPT + identity.main,
         messages: conversation,
@@ -195,28 +255,61 @@ export async function runAgent(deps) {
         signal,
         onDelta: (t) => emit({ kind: "assistant_delta", text: t }),
       });
+
+    let result;
+    try {
+      result = await callOnce();
     } catch (e) {
       if (signal.aborted) {
         emit({ kind: "aborted" });
         return;
       }
       const msg = String(e.message || e);
-      // The provider tells us at runtime when the chosen model can't do tools —
-      // relay that as guidance rather than a raw 404. (Robust: reacts to what the
-      // provider actually reports, so no model list to keep up to date.)
-      if (/no endpoints found that support tool|support tool use|does not support tools|tools are not supported|function calling is not supported/i.test(msg)) {
-        emit({
-          kind: "warning",
-          text: "This model can't call tools, so it can't act on the page. Pick a model that supports tool/function calling — e.g. openai/gpt-4o on OpenRouter. Note: some vision models (like certain Qwen-VL endpoints) have no tool-calling endpoint, so they can see but can't act. See “Need help choosing a model?” in Settings.",
-        });
-      } else if (sentImage) {
-        emit({
-          kind: "warning",
-          text: "That request included a screenshot, which the model rejected — it may be text-only. Switch to a multimodal model (e.g. gpt-4o-mini, gpt-4o, claude-3.5-sonnet) or turn off vision in Settings.",
-        });
+      // Reactive compaction: the estimate under-counts some text, so the
+      // provider's own "too long" is the reliable trigger. Compact once, retry
+      // once; a second refusal means the window is simply too small.
+      if (isContextOverflow(msg) && !compactedThisStep) {
+        compactedThisStep = true;
+        const r = await compactConversation({ conversation, provider, config, signal, tailBudget });
+        if (!r) {
+          emit({
+            kind: "error",
+            error: "The conversation is too large for this model's context window, and there is nothing left to compact. Start a new chat, or set a larger Context window in Settings.",
+          });
+          return;
+        }
+        compactNote(r);
+        try {
+          result = await callOnce();
+        } catch (e2) {
+          if (signal.aborted) {
+            emit({ kind: "aborted" });
+            return;
+          }
+          emit({
+            kind: "error",
+            error: "The conversation is still too large for this model's context window after compacting. Start a new chat, or set a larger Context window in Settings.",
+          });
+          return;
+        }
+      } else {
+        // The provider tells us at runtime when the chosen model can't do tools —
+        // relay that as guidance rather than a raw 404. (Robust: reacts to what the
+        // provider actually reports, so no model list to keep up to date.)
+        if (/no endpoints found that support tool|support tool use|does not support tools|tools are not supported|function calling is not supported/i.test(msg)) {
+          emit({
+            kind: "warning",
+            text: "This model can't call tools, so it can't act on the page. Pick a model that supports tool/function calling — e.g. openai/gpt-4o on OpenRouter. Note: some vision models (like certain Qwen-VL endpoints) have no tool-calling endpoint, so they can see but can't act. See “Need help choosing a model?” in Settings.",
+          });
+        } else if (sentImage) {
+          emit({
+            kind: "warning",
+            text: "That request included a screenshot, which the model rejected — it may be text-only. Switch to a multimodal model (e.g. gpt-4o-mini, gpt-4o, claude-3.5-sonnet) or turn off vision in Settings.",
+          });
+        }
+        emit({ kind: "error", error: msg });
+        return;
       }
-      emit({ kind: "error", error: msg });
-      return;
     }
 
     // Record the assistant turn (text + any tool calls).
@@ -606,52 +699,4 @@ function truncateForModel(result) {
   const s = JSON.stringify(result);
   if (s.length <= 12000) return result;
   return { ok: result.ok, note: "result truncated", preview: s.slice(0, 12000) };
-}
-
-function summarizeResult(name, r) {
-  if (r.ok === false) return r.error || "failed";
-  switch (name) {
-    case "read_page":
-      return `read page — ${(r.elements || []).length} interactive elements`;
-    case "get_page_text":
-      return `read ${r.text ? r.text.length : 0} chars of text`;
-    case "click_element":
-      return `clicked ${r.clicked || ""}`;
-    case "type_text":
-      return `typed "${(r.typed || "").slice(0, 40)}"${r.submitted ? " and submitted" : ""}`;
-    case "select_option":
-      return `selected ${r.selected || ""}`;
-    case "hover_element":
-      return `hovered ${r.hovered || ""}`;
-    case "double_click":
-      return `double-clicked ${r.doubleClicked || ""}`;
-    case "right_click":
-      return `right-clicked ${r.rightClicked || ""}`;
-    case "drag_element":
-      return "dragged element to target";
-    case "press_keys":
-      return `pressed ${r.pressed || "keys"}`;
-    case "take_screenshot":
-      return r.note || "captured screenshot";
-    case "run_javascript":
-      return `ran JS → ${String(r.result || "").slice(0, 60)}`;
-    case "read_console":
-      return `read ${(r.messages || []).length} console message(s)`;
-    case "read_network":
-      return `read ${(r.requests || []).length} network request(s)`;
-    case "navigate":
-      return `navigated to ${r.title || r.url || ""}`;
-    case "open_tab":
-      return `opened ${r.title || r.url || ""}`;
-    case "switch_tab":
-      return `switched to ${r.title || r.url || ""}`;
-    case "list_tabs":
-      return `${(r.tabs || []).length} tabs`;
-    case "scroll":
-      return `scrolled ${r.direction || ""}`;
-    case "wait":
-      return `waited ${r.waited_seconds}s`;
-    default:
-      return "done";
-  }
 }

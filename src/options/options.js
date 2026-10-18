@@ -604,6 +604,10 @@ function wireSettings() {
     config.settings.maxTokens = clampInt(e.target.value, 256, 128000, DEFAULT_SETTINGS.maxTokens);
     persist();
   });
+  $("#context-window").addEventListener("change", (e) => {
+    config.settings.contextWindow = clampInt(e.target.value, 4000, 1000000, DEFAULT_SETTINGS.contextWindow);
+    persist();
+  });
   const temp = $("#temperature");
   temp.addEventListener("input", () => {
     $("#temp-value").textContent = Number(temp.value).toFixed(2);
@@ -636,6 +640,7 @@ function renderSettings() {
   if (saRadio) saRadio.checked = true;
   $("#max-steps").value = s.maxSteps;
   $("#max-tokens").value = s.maxTokens;
+  $("#context-window").value = s.contextWindow;
   $("#temperature").value = s.temperature;
   $("#temp-value").textContent = Number(s.temperature).toFixed(2);
   $("#enable-vision").checked = !!s.enableVision;

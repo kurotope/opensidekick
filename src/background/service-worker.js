@@ -101,7 +101,12 @@ function loadLive() {
         // A hot copy without meta (a reload mid-session) is adopted as a new chat.
         session =
           meta && typeof meta.id === "string" && meta.id
-            ? { id: meta.id, sensitive: !!meta.sensitive, ...(meta.trimmed ? { trimmed: true } : {}) }
+            ? {
+                id: meta.id,
+                sensitive: !!meta.sensitive,
+                ...(meta.trimmed ? { trimmed: true } : {}),
+                ...(meta.compacted ? { compacted: true } : {}),
+              }
             : { id: crypto.randomUUID(), sensitive: false };
         return;
       }
@@ -128,7 +133,12 @@ function loadLive() {
 async function writeHot() {
   // Captured now: a New chat during the first set() must not get this chat's meta.
   const convo = conversation;
-  const meta = { id: session.id, sensitive: session.sensitive, ...(session.trimmed ? { trimmed: true } : {}) };
+  const meta = {
+    id: session.id,
+    sensitive: session.sensitive,
+    ...(session.trimmed ? { trimmed: true } : {}),
+    ...(session.compacted ? { compacted: true } : {}),
+  };
   try {
     await chrome.storage.session.set({ [SESSION_CONVO_KEY]: stripImages(convo), [SESSION_CONVO_META_KEY]: meta });
   } catch {
@@ -481,6 +491,7 @@ async function handleGetState() {
     // The sensitive-site note only makes sense while there is a History to keep out of.
     sensitive: !!(session && session.sensitive) && config.settings.keepHistory !== false,
     trimmed: !!(session && session.trimmed),
+    compacted: !!(session && session.compacted),
   };
 }
 
@@ -900,6 +911,14 @@ function requestPlanApproval(plan) {
 }
 
 function emit(event) {
+  // Compaction is the one event that changes what the chat itself is: record it
+  // on the session so a reopened panel can say so, and so a chat that compacted
+  // away a sensitive site's tool result keeps the flag that keeps it out of
+  // History (the end-of-run scan can no longer see the dropped messages).
+  if (event.kind === "compacted" && session) {
+    session.compacted = true;
+    if (event.sensitive) session.sensitive = true;
+  }
   chrome.runtime.sendMessage({ type: MSG.AGENT_EVENT, ...event }).catch(() => {});
 }
 

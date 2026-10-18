@@ -325,6 +325,57 @@ export async function executeTool(name, args, ctx) {
   }
 }
 
+// One-line description of a tool result, for the side panel's action log and for
+// the digest the compaction summariser reads. Lives here because it reads the
+// result shapes this file's tools produce — agent.js and compact.js both import it.
+export function summarizeResult(name, r) {
+  if (r.ok === false) return r.error || "failed";
+  switch (name) {
+    case "read_page":
+      return `read page — ${(r.elements || []).length} interactive elements`;
+    case "get_page_text":
+      return `read ${r.text ? r.text.length : 0} chars of text`;
+    case "click_element":
+      return `clicked ${r.clicked || ""}`;
+    case "type_text":
+      return `typed "${(r.typed || "").slice(0, 40)}"${r.submitted ? " and submitted" : ""}`;
+    case "select_option":
+      return `selected ${r.selected || ""}`;
+    case "hover_element":
+      return `hovered ${r.hovered || ""}`;
+    case "double_click":
+      return `double-clicked ${r.doubleClicked || ""}`;
+    case "right_click":
+      return `right-clicked ${r.rightClicked || ""}`;
+    case "drag_element":
+      return "dragged element to target";
+    case "press_keys":
+      return `pressed ${r.pressed || "keys"}`;
+    case "take_screenshot":
+      return r.note || "captured screenshot";
+    case "run_javascript":
+      return `ran JS → ${String(r.result || "").slice(0, 60)}`;
+    case "read_console":
+      return `read ${(r.messages || []).length} console message(s)`;
+    case "read_network":
+      return `read ${(r.requests || []).length} network request(s)`;
+    case "navigate":
+      return `navigated to ${r.title || r.url || ""}`;
+    case "open_tab":
+      return `opened ${r.title || r.url || ""}`;
+    case "switch_tab":
+      return `switched to ${r.title || r.url || ""}`;
+    case "list_tabs":
+      return `${(r.tabs || []).length} tabs`;
+    case "scroll":
+      return `scrolled ${r.direction || ""}`;
+    case "wait":
+      return `waited ${r.waited_seconds}s`;
+    default:
+      return "done";
+  }
+}
+
 // Show/update or hide the on-page activity overlay for a tab. Best-effort:
 // silently no-ops on restricted pages where the content script can't run.
 export async function setOverlay(tabId, state, label) {
