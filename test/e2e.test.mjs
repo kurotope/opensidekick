@@ -2226,6 +2226,30 @@ async function main() {
     const rows4 = await cardRows(tokPanel);
     check(JSON.stringify(rows4) === JSON.stringify([["Input", "1,500"], ["Output", "200"]]),
       `usage: no cache data leaves no cache rows and no repeated Total (got ${JSON.stringify(rows4)})`);
+    // A cache WRITE gets its own row: a turn that fills the cache is not a miss,
+    // and the write is billed above the input rate, so it is not a hit.
+    await tokPanel.evaluate(async ([idxKey, prefix, item, body]) => {
+      await chrome.storage.local.set({ [idxKey]: { v: 1, currentId: null, items: [item] }, [prefix + item.id]: body });
+    }, [
+      SESSIONS_INDEX_KEY,
+      SESSION_BODY_PREFIX,
+      { id: "write", title: "Cache write chat", createdAt: 3_000_000, updatedAt: 3_000_000, model: "mock-model", provider: "Mock", usage: { input: 1500, output: 200, cached: 1000, write: 100 } },
+      { id: "write", messages: [{ role: "user", content: "hi" }, { role: "assistant", content: "ok" }] },
+    ]);
+    await tokPanel.click("#history-btn");
+    await tokPanel.waitForSelector(".hist-item .hist-open", { timeout: 5000 });
+    const tip5 = await tokPanel.$eval(".hist-item .hist-open", (el) => el.title).catch(() => "");
+    check(tip5.includes("1,000 cached (67%)") && tip5.includes("100 written"),
+      `usage: history tooltip gives the write slice as well as the hit (got "${tip5}")`);
+    await tokPanel.click(".hist-item .hist-open");
+    await tokPanel.waitForFunction(() => !document.querySelector("#token-line").hidden, null, { timeout: 5000 });
+    const tok5 = await tokenText(tokPanel);
+    check(tok5 === "1.7k tok · cache 67%", `usage: the hit share is over the whole prompt, writes included (got "${tok5}")`);
+    await tokPanel.click("#token-line");
+    await tokPanel.waitForFunction(() => !document.querySelector("#token-card").hidden, null, { timeout: 5000 });
+    const rows5 = await cardRows(tokPanel);
+    const wantRows5 = [["Total", "1,700 tok"], ["Cache hit", "67%"], ["Cached input", "1,000"], ["Cache write", "100"], ["Uncached input", "400"], ["Output", "200"]];
+    check(JSON.stringify(rows5) === JSON.stringify(wantRows5), `usage: a cache write gets its own row (got ${JSON.stringify(rows5)})`);
     await tokPanel.close();
 
     // --- First-run / unconfigured (keep these LAST; they wipe the provider) ---

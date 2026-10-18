@@ -561,17 +561,19 @@ async function* sseStream(res) {
 }
 
 /**
- * Token counts in one shape: { input, output, cached }. Servers say it three
- * ways — prompt_tokens / completion_tokens (OpenAI-style), prompt_eval_count /
- * eval_count (Ollama's OpenAI-compatible endpoint), input_tokens /
- * output_tokens (Anthropic). Cache tokens count into input: the number should
- * be what the model processed, not just the uncached prefix. `cached` is the
- * slice of input the server read from its own cache, so uncached is input -
- * cached. Cache WRITES are not counted as cached: a write is billed above the
- * input rate (Anthropic 1.25×, OpenAI on GPT-5.6+), so calling it a hit
- * inflates the percentage the user reads. Null when nothing usable is
- * reported, so the UI can say "no counts from this server" instead of showing
- * zeros.
+ * Token counts in one shape: { input, output, cached, write }. Servers say it
+ * three ways — prompt_tokens / completion_tokens (OpenAI-style),
+ * prompt_eval_count / eval_count (Ollama's OpenAI-compatible endpoint),
+ * input_tokens / output_tokens (Anthropic). Cache tokens count into input: the
+ * number should be what the model processed, not just the uncached prefix.
+ * `cached` is the slice the server read from its own cache, `write` the slice it
+ * wrote into the cache; the two are disjoint parts of input, so uncached is
+ * input - cached - write. A cache WRITE is not a hit: it is billed above the
+ * input rate (Anthropic 1.25×, OpenAI on GPT-5.6+), so counting it as cached
+ * inflates the percentage the user reads — but it is worth showing, because a
+ * first turn that writes the cache looks like a pure miss without it. Null when
+ * nothing usable is reported, so the UI can say "no counts from this server"
+ * instead of showing zeros.
  */
 function normalizeUsage(raw) {
   if (!raw || typeof raw !== "object") return null;
@@ -586,13 +588,15 @@ function normalizeUsage(raw) {
   // prompt_tokens_details, DeepSeek and Groq put a hit count at the top level,
   // Kimi documents a top-level cached_tokens on the final usage chunk, and
   // Anthropic calls it cache_read_input_tokens. Reading all four costs nothing —
-  // a server that has none reports 0.
+  // a server that has none reports 0. Writes are named two ways: OpenRouter's
+  // cache_write_tokens, Anthropic's cache_creation_input_tokens.
   const details = raw.prompt_tokens_details;
   const cached = Math.min(
     n(details && details.cached_tokens) || n(raw.prompt_cache_hit_tokens) || n(raw.cached_tokens) || n(raw.cache_read_input_tokens),
     input,
   );
-  return { input, output, cached };
+  const write = Math.min(n(details && details.cache_write_tokens) || n(raw.cache_creation_input_tokens), input - cached);
+  return { input, output, cached, write };
 }
 
 // Anthropic reports input in message_start and output cumulatively in
@@ -604,6 +608,7 @@ function mergeUsage(a, b) {
     input: Math.max(a.input, b.input),
     output: Math.max(a.output, b.output),
     cached: Math.max(a.cached, b.cached),
+    write: Math.max(a.write, b.write),
   };
 }
 

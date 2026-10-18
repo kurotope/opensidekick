@@ -604,17 +604,18 @@ async function handleRunTask(msg) {
   // Captured now: New chat mid-run must not redirect this run's save.
   const runSession = session;
   const runConversation = conversation;
-  runSession.usage = cleanUsage(runSession.usage) || { input: 0, output: 0, cached: 0 };
+  runSession.usage = cleanUsage(runSession.usage) || { input: 0, output: 0, cached: 0, write: 0 };
   const saveMeta = { model: config.activeModel, provider: provider.name, usage: runSession.usage };
   // Each provider call reports its own token counts, so they add to the chat's
   // running total as they arrive: the number on screen and in the saved chat is
-  // the whole chat, not the last turn. cleanUsage drops a zero cached field, so
+  // the whole chat, not the last turn. cleanUsage drops a zero cache field, so
   // the running total has to carry its own.
   const runEmit = (ev) => {
     if (ev.kind === "usage") {
       runSession.usage.input += ev.input;
       runSession.usage.output += ev.output;
       runSession.usage.cached = (runSession.usage.cached || 0) + (ev.cached || 0);
+      runSession.usage.write = (runSession.usage.write || 0) + (ev.write || 0);
     }
     emit(ev);
   };

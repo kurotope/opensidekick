@@ -14,7 +14,7 @@ import {
   TRIMMED_NOTE,
 } from "../common/constants.js";
 import { matchPrompts, isSlashQuery } from "../common/prompts.js";
-import { cacheHitText } from "../common/usage.js";
+import { cacheHitText, uncachedInput } from "../common/usage.js";
 import { relativeTime } from "../background/sessions.js";
 
 const els = {
@@ -273,17 +273,23 @@ function renderTokenLine() {
 }
 
 // The breakdown behind the token line: one row per count, label left, number
-// right. Cache rows appear only when the server reported cache reads.
+// right. Cache rows appear only when the server reported cache traffic.
 function renderTokenCard() {
   const u = chatUsage;
   if (!u || !(u.input + u.output)) return;
   const hit = cacheHitText(u);
+  const write = u.write || 0;
   // Total is the pill's number said again, so it is only worth a row when the
   // split under it makes the sum new information. Without cache data the card
   // is Input and Output, which is the whole story.
   const rows = [];
-  if (hit) {
-    rows.push(["Total", `${(u.input + u.output).toLocaleString()} tok`], ["Cache hit", `${hit}%`], ["Cached input", u.cached.toLocaleString()], ["Uncached input", (u.input - u.cached).toLocaleString()]);
+  if (hit || write) {
+    rows.push(["Total", `${(u.input + u.output).toLocaleString()} tok`]);
+    if (hit) rows.push(["Cache hit", `${hit}%`], ["Cached input", u.cached.toLocaleString()]);
+    // A write is not a hit, and it is billed above the input rate, so it gets
+    // its own row: a first turn that fills the cache is not a pure miss.
+    if (write) rows.push(["Cache write", write.toLocaleString()]);
+    rows.push(["Uncached input", uncachedInput(u).toLocaleString()]);
   } else {
     rows.push(["Input", u.input.toLocaleString()]);
   }
@@ -596,6 +602,7 @@ function handleEvent(ev) {
         input: (chatUsage ? chatUsage.input : 0) + ev.input,
         output: (chatUsage ? chatUsage.output : 0) + ev.output,
         cached: (chatUsage && chatUsage.cached ? chatUsage.cached : 0) + (ev.cached || 0),
+        write: (chatUsage && chatUsage.write ? chatUsage.write : 0) + (ev.write || 0),
       };
       renderTokenLine();
       break;
@@ -1424,7 +1431,9 @@ function renderHistoryMenu(res) {
       const tip = escapeHtml(
         `${it.title}\n${new Date(it.updatedAt).toLocaleString()}${who ? ` · ${who}` : ""}${
           it.usage ? ` · ${it.usage.input.toLocaleString()} in / ${it.usage.output.toLocaleString()} out` : ""
-        }${it.usage && it.usage.cached ? ` · ${it.usage.cached.toLocaleString()} cached (${cacheHitText(it.usage)}%)` : ""}`,
+        }${it.usage && it.usage.cached ? ` · ${it.usage.cached.toLocaleString()} cached (${cacheHitText(it.usage)}%)` : ""}${
+          it.usage && it.usage.write ? ` · ${it.usage.write.toLocaleString()} written` : ""
+        }`,
       ).replace(/\n/g, "&#10;");
       const model = it.model ? `<span aria-hidden="true">·</span><span class="hist-model">${escapeHtml(it.model)}</span>` : "";
       return (

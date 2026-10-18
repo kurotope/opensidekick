@@ -145,7 +145,7 @@ export async function runAgent(deps) {
     let plan = null;
     try {
       plan = await makePlan(provider, config, conversation, signal, identity.plan, (u) =>
-        emit({ kind: "usage", input: u.input, output: u.output, cached: u.cached }),
+        emit({ kind: "usage", input: u.input, output: u.output, cached: u.cached, write: u.write }),
       );
     } catch {
       plan = null; // if planning fails, fall through and run normally
@@ -231,7 +231,7 @@ export async function runAgent(deps) {
     // Token counts for this provider call, once per call: a turn with 12 tool
     // calls is 12 calls, and the chat total is the sum.
     if (result.usage)
-      emit({ kind: "usage", input: result.usage.input, output: result.usage.output, cached: result.usage.cached });
+      emit({ kind: "usage", input: result.usage.input, output: result.usage.output, cached: result.usage.cached, write: result.usage.write });
 
     if (!result.toolCalls || result.toolCalls.length === 0) {
       emit({ kind: "done" });
