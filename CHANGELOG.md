@@ -5,6 +5,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added
+
+- **Context compaction.** A long chat used to die at the provider's request
+  limit. Settings → Behavior sets the context window (default 128,000 tokens);
+  when the chat nears it, the oldest turns are replaced by a summary the
+  configured model writes, cut at a user-message boundary so no tool result is
+  orphaned from its call, and the recent turns stay verbatim. The provider's own
+  context-length refusal triggers one compaction and retry. The chat shows a line
+  naming what was compacted, with the summary readable, and a reopened panel says
+  the chat was compacted. Compaction replaces messages the provider had already
+  cached, so the next request reads little or none of its cache and the token
+  meter dips visibly at that point. That is the provider's behaviour, not a meter
+  bug: OpenAI's own docs say compaction reduces cache reuse.
+
 ### Fixed
 
 - **`click_element` fired twice.** The content script dispatched a synthetic

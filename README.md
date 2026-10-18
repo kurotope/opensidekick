@@ -101,6 +101,15 @@ genuinely agentic, and usable with any LLM — including fully local models.**
   chat (your messages and the replies), not screenshots or page contents, and a
   chat in which the assistant reads, opens or screenshots a banking, payment or
   crypto site is never saved.
+- **Context compaction** — a long chat is summarised before it hits your model's
+  context window (Settings → Behavior sets the window, default 128,000 tokens).
+  The oldest turns are replaced by a summary the model writes, cut at a
+  user-message boundary so no tool result is orphaned from its call, and the
+  recent turns stay verbatim; a provider's own context-length refusal triggers
+  one compaction and retry. The chat shows a line naming what was compacted, with
+  the summary readable. Compaction replaces messages the provider had cached, so
+  the token meter dips visibly at that point — that is the provider's behaviour,
+  not a meter bug.
 - **Scheduled tasks** — run a prompt on a repeating schedule (hourly / daily /
   weekly, or any interval) while Chrome is open; the result arrives as a
   notification. Unattended runs act without asking and decline purchases/deletions.
