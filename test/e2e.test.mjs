@@ -27,6 +27,8 @@ import {
   TASK_RUNS_KEY,
   HISTORY_NOTICE,
   TRIMMED_NOTE,
+  COMPACTED_NOTE,
+  SESSION_CONVO_KEY,
 } from "../src/common/constants.js";
 
 const EXT_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -37,6 +39,8 @@ let lastImageUrl = ""; // the most recent image data URI the mock received
 let probeRequests = []; // { model, kind } per testModel probe the mock answered
 let probeDelayMs = 0; // holds the tools probe open, so a run can be observed/cancelled
 let lastSystem = ""; // the system prompt of the most recent agent (non-probe) request
+let overflowPending = false; // refuse the next request once with a context-length error
+let compactRequests = []; // { digestChars } per compaction summariser call the mock answered
 const HOSTED_ALIAS = "hosted.test"; // mapped onto the mock by --host-resolver-rules
 const check = (cond, msg) => {
   console.log((cond ? "ok  : " : "FAIL: ") + msg);
@@ -129,6 +133,23 @@ function decide(messages) {
   }
   if (/the magic word is plum/.test(firstUser)) {
     return { kind: "text", text: "Noted." };
+  }
+
+  // Context compaction. Three big tool results fill the chat, then a long
+  // follow-up crosses the small context window; the follow-up is only answerable
+  // from the summary the summariser wrote, so it proves the oldest turns were
+  // folded away AND that the model can still act on them. Keyed on the LAST user
+  // turn, since the first turn is the long task in every later request.
+  if (/long task/.test(lastUser)) {
+    if (n < 3) return { kind: "tool", name: "run_javascript", args: { code: 'return "x".repeat(2000);' } };
+    return { kind: "text", text: "read three long pages" };
+  }
+  if (/what did you find/.test(lastUser)) {
+    const sum = messages.find((m) => typeof m.content === "string" && /Compacted conversation summary/.test(m.content));
+    return { kind: "text", text: sum && /SUMMARY MARKER/.test(sum.content) ? "compacted_seen=yes" : "compacted_seen=no" };
+  }
+  if (/overflow test/.test(lastUser)) {
+    return { kind: "text", text: "overflow_recovered" };
   }
 
   // Vision: take a screenshot, then confirm once the image comes back.
@@ -375,6 +396,20 @@ function startServer() {
           return reply();
         }
         lastSystem = messages.find((m) => m.role === "system")?.content || "";
+        // The compaction summariser is the only other request sent with no tools,
+        // told apart by its system prompt. Answer with a summary carrying a
+        // marker the follow-up turn has to quote back.
+        if (/compressing the earlier part of a browser-agent conversation/.test(lastSystem)) {
+          compactRequests.push({ digestChars: String((messages[1] && messages[1].content) || "").length });
+          return sseText(res, "SUMMARY MARKER: the user asked for the cheapest room. Standard is $80, Deluxe $120. Nothing was booked.");
+        }
+        // Reactive compaction: refuse the next request once with a provider
+        // context-length error, so the run has to compact and retry.
+        if (overflowPending) {
+          overflowPending = false;
+          res.writeHead(400, { "content-type": "application/json", "access-control-allow-origin": "*" });
+          return res.end(JSON.stringify({ error: { message: "This model's maximum context length is 8000 tokens. However, your messages resulted in 120000 tokens" } }));
+        }
         // The plan-approval "planning" call is the only request sent with no tools.
         if (!bodyObj.tools || bodyObj.tools.length === 0) {
           return sseText(
@@ -1426,6 +1461,83 @@ async function main() {
     await new Promise((r) => setTimeout(r, 300));
     const cleared = await runTask("What is the magic word?", false);
     check(/no-context/.test(answerOf(cleared)), `context: NEW_CHAT clears the stored conversation (got "${answerOf(cleared)}")`);
+
+    // --- Context compaction: a long first turn, then a follow-up that is only
+    // answerable from the summary the summariser wrote. The chat has to say what
+    // was compacted, the summary has to be readable, and History must not keep
+    // the summary (it is plumbing, not what the user sees). ---
+    const compPanel = await context.newPage();
+    await compPanel.goto(`chrome-extension://${extId}/src/sidepanel/sidepanel.html`, { waitUntil: "load" });
+    await compPanel.waitForTimeout(400);
+    await compPanel.click("#new-chat");
+    await compPanel.waitForTimeout(300);
+
+    const setWindow = async (w) =>
+      compPanel.evaluate(
+        async ([key, win]) => {
+          const cfg = (await chrome.storage.local.get(key))[key];
+          cfg.settings = { ...cfg.settings, contextWindow: win };
+          await chrome.storage.local.set({ [key]: cfg });
+        },
+        [STORAGE_KEY, w],
+      );
+    // Small enough that the follow-up turn crosses the budget.
+    await setWindow(14000);
+
+    const compSend = async (text) => {
+      await compPanel.fill("#input", text);
+      await testPage.bringToFront();
+      await compPanel.click("#send-btn");
+      for (let i = 0; i < 120; i++) {
+        if (await compPanel.$eval("#send-btn", (el) => !el.hidden).catch(() => false)) return;
+        await new Promise((r) => setTimeout(r, 200));
+      }
+    };
+
+    await compSend("Run the long task: read the page three times.");
+    const notesAfterTurn1 = await compPanel.$$eval(".note", (els) => els.map((e) => e.textContent)).catch(() => []);
+    await compSend("What did you find? " + "filler ".repeat(3400));
+
+    const compNotes = await compPanel.$$eval(".note", (els) => els.map((e) => e.textContent)).catch(() => []);
+    const compAnswers = await compPanel.$$eval(".msg.assistant", (els) => els.map((e) => e.textContent)).catch(() => []);
+    check(!notesAfterTurn1.some((t) => /Compacted/.test(t)), `compaction: nothing compacted while the first turn was inside the window (${notesAfterTurn1.length} notes)`);
+    check(compNotes.some((t) => /Compacted the \d+ oldest messages into a summary/.test(t)), `compaction: the chat says what was compacted (${JSON.stringify(compNotes.filter((t) => /Compacted/.test(t)))})`);
+    check(compAnswers.some((t) => /compacted_seen=yes/.test(t)), `compaction: the follow-up answered from the summary (got "${compAnswers.slice(-1)[0]}")`);
+    check(compNotes.some((t) => /Show summary/.test(t)), "compaction: the note offers the summary to read");
+    check(compactRequests.length === 1, `compaction: exactly one provider call per compaction (${compactRequests.length})`);
+    check(compactRequests[0] && compactRequests[0].digestChars > 1000, `compaction: the summariser got the page facts, not just the prompts (${compactRequests[0] && compactRequests[0].digestChars} chars)`);
+
+    const compStored = await compPanel.evaluate(async (key) => (await chrome.storage.session.get(key))[key] || [], SESSION_CONVO_KEY);
+    check(compStored.length > 0 && compStored[0].compacted === true, `compaction: the summary is the first message of the live chat (${compStored.length} msgs)`);
+    check(compStored.some((m) => m.role === "user" && /What did you find/.test(m.content || "")), "compaction: the recent turn stays verbatim");
+
+    const compSaved = await compPanel.evaluate(async (pfx) => {
+      const all = await chrome.storage.local.get(null);
+      return Object.keys(all).filter((k) => k.startsWith(pfx)).map((k) => all[k]).flat();
+    }, SESSION_BODY_PREFIX);
+    check(!compSaved.some((m) => /Compacted conversation summary/.test(m.content || "")), "compaction: the summary is not saved to History");
+
+    // Reactive path: the provider refuses once with a context-length error, and
+    // the run recovers by compacting and retrying. The window is restored first
+    // so the pre-emptive check does not fire before the refusal.
+    await setWindow(128000);
+    overflowPending = true;
+    await compSend("Overflow test: answer once the provider refuses.");
+    const compAnswers2 = await compPanel.$$eval(".msg.assistant", (els) => els.map((e) => e.textContent)).catch(() => []);
+    const compNotes2 = await compPanel.$$eval(".note", (els) => els.map((e) => e.textContent)).catch(() => []);
+    const compErrors = await compPanel.$$eval(".alert.bad", (els) => els.map((e) => e.textContent)).catch(() => []);
+    check(compAnswers2.some((t) => /overflow_recovered/.test(t)), `compaction: recovered from a provider context-length refusal (got "${compAnswers2.slice(-1)[0]}")`);
+    check(compErrors.length === 0, `compaction: the refusal never reached the chat as an error (${JSON.stringify(compErrors)})`);
+    check(compNotes2.filter((t) => /Compacted/.test(t)).length > compNotes.filter((t) => /Compacted/.test(t)).length, `compaction: the reactive compaction is reported in the chat too (${compNotes2.filter((t) => /Compacted/.test(t)).length} notes)`);
+
+    // A reopened panel says the chat was compacted.
+    await compPanel.close();
+    const compPanel2 = await context.newPage();
+    await compPanel2.goto(`chrome-extension://${extId}/src/sidepanel/sidepanel.html`, { waitUntil: "load" });
+    await compPanel2.waitForTimeout(500);
+    const reNotes = await compPanel2.$$eval(".note", (els) => els.map((e) => e.textContent)).catch(() => []);
+    check(reNotes.some((t) => t.includes(COMPACTED_NOTE)), `compaction: a reopened panel notes the compaction (${JSON.stringify(reNotes.slice(0, 2))})`);
+    await compPanel2.close();
 
     // --- Context survives closing & reopening the PANEL, driven through the real
     // composer (the first submit after reopen used to send newChat:true and wipe

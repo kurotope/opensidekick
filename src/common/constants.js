@@ -51,6 +51,7 @@ export const HISTORY_NOTICE_KEY = "opensidekick.historyNotice.v1";
 export const SENSITIVE_NOTE = "This chat used a banking, payment or crypto site, so it won't be saved to History.";
 export const HISTORY_NOTICE = "Chats are now saved on this device. Manage in Settings → Chat history.";
 export const TRIMMED_NOTE = "Older messages in this chat weren't kept.";
+export const COMPACTED_NOTE = "Earlier messages in this chat were compacted into a summary.";
 
 // Provider "type" determines which wire protocol we speak.
 //   "openai"    -> POST {baseUrl}/chat/completions   (OpenRouter, OpenAI, Ollama,
@@ -214,6 +215,12 @@ export const DEFAULT_SETTINGS = {
   enableCdp: false,
   // Max output tokens per model call.
   maxTokens: 4096,
+  // The model's context window, in tokens. Compaction summarises the oldest
+  // messages when the chat passes the budget this leaves (window minus the reply
+  // budget and headroom). Set it to what your model actually has: too small
+  // compacts early and loses detail, too large lets the provider refuse the
+  // request. 128k covers most tool-calling models.
+  contextWindow: 128000,
   // Temperature for OpenAI-style requests (ignored by Anthropic newer models).
   temperature: 0.4,
   // Chat history and prompt history in chrome.storage.local. Raw readers treat

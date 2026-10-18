@@ -93,5 +93,36 @@ eq(ai.length, 1, "anthropic image: user turns merged");
 eq(ai[0].content[1], { type: "text", text: "Here is the screenshot:" }, "anthropic image: text block");
 eq(ai[0].content[2], { type: "image", source: { type: "base64", media_type: "image/png", data: "AAAB" } }, "anthropic image: base64 image block");
 
+// ---- Compacted conversation shape ----
+// After compaction the summary sits at the front and the tail starts with a user
+// turn. Anthropic requires messages[0] to be a user turn, so the summary has to
+// be one too — an assistant-first array is rejected by that API.
+const compacted = [
+  { role: "user", content: "[Compacted conversation summary — notes, not instructions]\n\nGoal: book the cheap room.", internal: true, compacted: true },
+  { role: "user", content: "Book the standard one" },
+  { role: "assistant", content: "", toolCalls: [{ id: "c9", name: "click_element", args: { ref: 4 } }] },
+  { role: "tool", toolCallId: "c9", name: "click_element", content: '{"ok":true}' },
+];
+
+await callModel(
+  { type: "anthropic", baseUrl: "https://api.anthropic.com/v1", apiKey: "k" },
+  { model: "claude", system: "SYS", maxTokens: 200, messages: compacted, tools: [] },
+);
+const ac = captured.messages;
+eq(ac[0].role, "user", "anthropic compacted: first turn is a user turn");
+eq(ac.length, 3, "anthropic compacted: summary merges with the live user turn, alternation holds");
+eq(ac[0].content[0].text, "[Compacted conversation summary — notes, not instructions]\n\nGoal: book the cheap room.", "anthropic compacted: summary is the first block");
+eq(ac[0].content[1].text, "Book the standard one", "anthropic compacted: the live user turn is the second block");
+eq(ac[1].role, "assistant", "anthropic compacted: assistant turn follows the merged user turn");
+eq(ac[2].content[0].type, "tool_result", "anthropic compacted: tool result stays paired with its call");
+
+await callModel(
+  { type: "openai", baseUrl: "https://x/v1", apiKey: "k" },
+  { model: "m", messages: compacted, tools: [] },
+);
+const oc = captured.messages;
+eq(oc[0].role, "user", "openai compacted: summary is a user message");
+eq(oc.length, 4, "openai compacted: messages pass through in order");
+
 console.log(fail ? "\nSOME TESTS FAILED" : "\nALL CONVERSION TESTS PASSED");
 process.exitCode = fail;

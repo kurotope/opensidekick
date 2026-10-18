@@ -977,6 +977,36 @@ body {
   background: linear-gradient(var(--os-hover), var(--os-hover)) var(--os-surface);
 }
 
+/* The summary a compaction produced: quiet and expandable, ruled like the log. */
+.compacted-summary {
+  align-self: stretch;
+  font-size: var(--os-fs-12);
+  line-height: var(--os-lh-12);
+  color: var(--os-muted);
+}
+.compacted-summary > summary {
+  list-style: none;
+  cursor: pointer;
+  min-height: 32px;
+  padding: 0 8px;
+  margin-left: -8px;
+  border-radius: var(--os-r);
+  width: fit-content;
+}
+.compacted-summary > summary::-webkit-details-marker {
+  display: none;
+}
+.compacted-summary > summary:hover {
+  background: var(--os-hover);
+  color: var(--os-ink-soft);
+}
+.compacted-summary > div {
+  margin: 4px 0 0 5px;
+  padding-left: 18px;
+  border-left: 1px solid var(--os-line);
+  color: var(--os-ink-soft);
+}
+
 .alert {
   align-self: stretch;
   display: flex;
