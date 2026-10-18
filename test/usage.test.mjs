@@ -3,7 +3,7 @@
 // browser test is bad at checking that a meter never rounds a partial hit to
 // 100%, and a node check is good at it.
 
-import { cleanUsage, cacheHitText, uncachedInput, addUsage } from "../src/common/usage.js";
+import { cleanUsage, cacheHitText, uncachedInput, addUsage, contextPercent } from "../src/common/usage.js";
 
 let fail = 0;
 const ok = (c, m) => { console.log((c ? "ok  : " : "FAIL: ") + m); if (!c) fail = 1; };
@@ -52,6 +52,16 @@ ok(cacheHitText({ input: 10000, output: 20, cached: 9995 }) === "99.95", "cacheH
 ok(cacheHitText({ input: 10000, output: 20, cached: 9990 }) === "99.9", "cacheHitText: one decimal is enough when it keeps the answer below 100");
 ok(cacheHitText({ input: 1000000, output: 20, cached: 999999 }) === "99.9999", "cacheHitText: 99.9999% stays 99.9999, not 100");
 ok(cacheHitText({ input: 100000000, output: 20, cached: 99999999 }) === "99.999999", "cacheHitText: the honest floor for a near-perfect hit");
+
+// ---- contextPercent: how full the window reads ----
+ok(contextPercent(17000, 124000) === "14", "contextPercent: 17k of a 124k budget reads 14%");
+ok(contextPercent(0, 124000) === "0", "contextPercent: an empty chat reads 0%");
+ok(contextPercent(124000, 124000) === "100", "contextPercent: at the budget is 100%");
+ok(contextPercent(130000, 124000) === "100", "contextPercent: over the budget is 100%");
+ok(contextPercent(123500, 124000) === "99.6", "contextPercent: a near-full chat is not rounded up to 100%");
+ok(contextPercent(123999, 124000) === "99.999", "contextPercent: a nearly full window keeps the decimals it needs to stay below 100");
+ok(contextPercent(17000, 0) === null, "contextPercent: no budget says nothing");
+ok(contextPercent(17000, null) === null, "contextPercent: a missing budget says nothing");
 
 console.log(fail ? "\nSOME ACCOUNTING CHECKS FAILED" : "\nALL ACCOUNTING CHECKS PASSED");
 process.exitCode = fail;

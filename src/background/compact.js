@@ -62,19 +62,36 @@ export function estimateMessages(messages) {
   return (messages || []).reduce((n, m) => n + estimateMessage(m), 0);
 }
 
+// The window split into the three parts a request carries. The occupancy card
+// shows these rows, so the split has to be the same arithmetic estimateContext
+// does: a card whose rows do not add up to the bar is the same class of lie as a
+// cache hit of 0%.
+export function contextParts({ system, tools, messages }) {
+  const sys = estimateTokens(system || "");
+  const defs = tools && tools.length ? estimateTokens(JSON.stringify(tools)) : 0;
+  const msgs = estimateMessages(messages);
+  return { system: sys, tools: defs, messages: msgs, total: sys + defs + msgs };
+}
+
 // The system prompt and the tool definitions ride on every request, so they
 // count toward the window too.
-export function estimateContext({ system, tools, messages }) {
-  let n = estimateTokens(system || "");
-  if (tools && tools.length) n += estimateTokens(JSON.stringify(tools));
-  return n + estimateMessages(messages);
+export function estimateContext(ctx) {
+  return contextParts(ctx).total;
 }
 
 // What the conversation is allowed to occupy: the window minus the reply budget
 // and the reserve. Floored so a tiny window setting can't make the budget 0.
+export const DEFAULT_WINDOW = 128000;
+
+// The window as the user set it, read the same way the budget reads it: the
+// occupancy card names the window, so the default lives in one place.
+export function contextWindowOf(config) {
+  return Number(config && config.settings && config.settings.contextWindow) || DEFAULT_WINDOW;
+}
+
 export function contextBudget(config) {
   const s = (config && config.settings) || {};
-  const win = Number(s.contextWindow) || 128000;
+  const win = Number(s.contextWindow) || DEFAULT_WINDOW;
   const out = Number(s.maxTokens) || 4096;
   return Math.max(2000, win - out - RESERVE_TOKENS);
 }

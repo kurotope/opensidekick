@@ -59,6 +59,35 @@ export function uncachedInput(u) {
 }
 
 /**
+ * How full the context window is, as a share of what the conversation is allowed
+ * to occupy, as text, or null when there is no budget.
+ *
+ * The same honesty rule as the cache meter: a partial fill is never rounded up to
+ * 100%. 100% is printed only when the conversation is at or over the budget, the
+ * state compaction exists to fix — a bar reading 100% at 99.5% hides the room
+ * that is left, and a user who stops trusting the meter stops watching it.
+ *
+ * The denominator is the budget, not the raw window, because the budget is what
+ * compaction fires at: a bar measured against the window reads emptier than the
+ * state the app acts on, and the chat compacts at what looks like 70%.
+ */
+export function contextPercent(used, budget) {
+  if (!budget || budget <= 0) return null;
+  if (used >= budget) return "100";
+  // Percentage units at d decimals, rounded half up, until a decimal is needed
+  // to keep the answer below 100.
+  for (let d = 0; d <= 6; d++) {
+    const f = 10 ** d;
+    const units = Math.round((used * 100 * f) / budget);
+    if (units < 100 * f) {
+      const text = (units / f).toFixed(d);
+      return d === 0 ? text : text.replace(/\.?0+$/, "");
+    }
+  }
+  return "99.999999";
+}
+
+/**
  * Cache reads as a share of the prompt, as text, or null when the server
  * reported no cache data: a server that never reports it reads 0%, which is the
  * app's silence, not the user's behaviour, so the UI says nothing about cache.

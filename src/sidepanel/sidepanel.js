@@ -18,7 +18,7 @@ import { matchPrompts, isSlashQuery } from "../common/prompts.js";
 import { classifyFile, targetSize, acceptImage, ATTACH_NOTES } from "../common/attachments.js";
 import { escapeHtml } from "../common/escape.js";
 import { markdownToHtml, createStreamingRenderer, CODE_CLASS, setHighlighter } from "../common/markdown.js";
-import { cacheHitText, uncachedInput, addUsage } from "../common/usage.js";
+import { cacheHitText, uncachedInput, addUsage, contextPercent } from "../common/usage.js";
 import { relativeTime } from "../background/sessions.js";
 
 // Prism loads as scripts in sidepanel.html, so it is a global by the time this
@@ -64,6 +64,8 @@ const els = {
   jumpLatest: document.getElementById("jump-latest"),
   modelLine: document.getElementById("model-line"),
   modelChip: document.getElementById("model-chip"),
+  ctxLine: document.getElementById("context-line"),
+  ctxCard: document.getElementById("context-card"),
   tokenLine: document.getElementById("token-line"),
   tokenCard: document.getElementById("token-card"),
 };
@@ -93,6 +95,14 @@ let logGroup = null; // the open <details> run of consecutive tool rows
 // sums every provider call) and sends it with the chat state; the panel adds
 // each usage event as it arrives, so the number updates during a run.
 let chatUsage = null;
+// The occupancy snapshot: the parts of the request the model last got, measured
+// in the worker, where the conversation lives. The panel never estimates the
+// window itself — it shows what the worker measured, so the bar and the
+// compaction decision can never disagree.
+let chatContext = null;
+// The prompt size the server reported for the last call, so the estimate and the
+// number the provider billed sit in the same card.
+let chatPrompt = null;
 
 init();
 
@@ -208,6 +218,7 @@ async function init() {
   els.settings.addEventListener("click", () => chrome.runtime.openOptionsPage());
   els.modelChip.addEventListener("click", () => chrome.runtime.openOptionsPage());
   els.tokenLine.addEventListener("click", toggleTokenCard);
+  els.ctxLine.addEventListener("click", toggleCtxCard);
   // Escape closes the breakdown. Focus stays on the number after the click, so
   // the keydown has to be on the button as well as the card.
   els.tokenLine.addEventListener("keydown", (e) => {
@@ -215,6 +226,12 @@ async function init() {
   });
   els.tokenCard.addEventListener("keydown", (e) => {
     if (e.key === "Escape") hideTokenCard();
+  });
+  els.ctxLine.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") hideCtxCard();
+  });
+  els.ctxCard.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") hideCtxCard();
   });
   if (els.setupLink) els.setupLink.addEventListener("click", (e) => { e.preventDefault(); chrome.runtime.openOptionsPage(); });
   document.querySelectorAll(".examples li").forEach((li) =>
@@ -244,7 +261,10 @@ function applyState(state) {
   }
   if (state.running) setRunning(true);
   chatUsage = state.usage || null;
+  chatContext = state.context || null;
+  chatPrompt = state.prompt || null;
   renderTokenLine();
+  renderContextLine();
   // A recording kept running in the worker while the panel was closed — pick
   // the banner (and step count) back up so Stop still works.
   if (state.recording) {
@@ -386,6 +406,80 @@ function hideTokenCard() {
 function tokenCardOutside(e) {
   if (els.tokenCard.contains(e.target) || els.tokenLine.contains(e.target)) return;
   hideTokenCard();
+}
+
+// The occupancy pill: the share of the budget the conversation occupies right
+// now. A percentage only — the numbers go in the card, because the header has
+// room for a model id, a chip, and one short number.
+function renderContextLine() {
+  const c = chatContext;
+  const pct = c && c.total ? contextPercent(c.total, c.budget) : null;
+  if (pct === null) {
+    els.ctxLine.hidden = true;
+    hideCtxCard();
+    return;
+  }
+  els.ctxLine.hidden = false;
+  els.ctxLine.textContent = `${pct}%`;
+  els.ctxLine.classList.toggle("warm", Number(pct) >= 80);
+  els.ctxLine.title = `Context used: ${pct}% of the ${c.budget.toLocaleString()} tokens the conversation may occupy. Click for the breakdown.`;
+  els.ctxLine.setAttribute("aria-label", `${c.total.toLocaleString()} of ${c.budget.toLocaleString()} tokens used. Show the breakdown.`);
+  if (!els.ctxCard.hidden) renderCtxCard();
+}
+
+// The occupancy card: the bar, then the three parts a request carries, then the
+// prompt size the server reported. The rows are the same arithmetic the worker
+// used, so they add up to the bar — a card whose rows do not sum to the bar is
+// the same class of lie as a cache hit of 0%.
+function renderCtxCard() {
+  const c = chatContext;
+  if (!c || !c.total) return;
+  const pct = contextPercent(c.total, c.budget);
+  const warm = pct !== null && Number(pct) >= 80;
+  const fill = Math.min(100, Math.round((c.total * 100) / c.budget));
+  const rows = [
+    ["Used", `~${c.total.toLocaleString()} / ${c.budget.toLocaleString()}`],
+    ["Window", c.window.toLocaleString()],
+    ["System prompt", c.system.toLocaleString()],
+    ["Tool definitions", c.tools.toLocaleString()],
+    ["Messages", c.messages.toLocaleString()],
+  ];
+  // The server's own count, when a call reported one: chars/4 is a heuristic, so
+  // the row lets the user see how far off it is. A server that reports nothing
+  // leaves the row out, the same rule as the cache rows in the token card.
+  if (chatPrompt) rows.push(["Server's count", chatPrompt.toLocaleString()]);
+  els.ctxCard.innerHTML =
+    `<div class="ctx-bar${warm ? " warm" : ""}"><div class="ctx-fill" style="width:${fill}%"></div></div>` +
+    rows
+      .map(([label, val]) => `<div class="tk-row"><span class="tk-label">${label}</span><span class="tk-val">${val}</span></div>`)
+      .join("");
+}
+
+function toggleCtxCard() {
+  if (!els.ctxCard.hidden) return hideCtxCard();
+  if (!chatContext || !chatContext.total) return;
+  renderCtxCard();
+  els.ctxCard.hidden = false;
+  // From the pill's rect, as the token card: the occupancy pill sits left of the
+  // cost pill, so a fixed anchor would open the card away from what was clicked.
+  const rect = els.ctxLine.getBoundingClientRect();
+  const maxLeft = document.documentElement.clientWidth - els.ctxCard.offsetWidth - 8;
+  els.ctxCard.style.top = `${Math.round(rect.bottom) + 4}px`;
+  els.ctxCard.style.left = `${Math.max(8, Math.min(rect.left, maxLeft))}px`;
+  els.ctxLine.setAttribute("aria-expanded", "true");
+  document.addEventListener("mousedown", ctxCardOutside, true);
+}
+
+function hideCtxCard() {
+  if (els.ctxCard.hidden) return;
+  els.ctxCard.hidden = true;
+  els.ctxLine.setAttribute("aria-expanded", "false");
+  document.removeEventListener("mousedown", ctxCardOutside, true);
+}
+
+function ctxCardOutside(e) {
+  if (els.ctxCard.contains(e.target) || els.ctxLine.contains(e.target)) return;
+  hideCtxCard();
 }
 
 // -------------------------------------------------------------------------
@@ -735,7 +829,10 @@ function newChat() {
   lastSentImages = [];
   renderAttachStrip();
   chatUsage = null; // a new chat has spent nothing
+  chatContext = null; // and has no request measured yet
+  chatPrompt = null;
   renderTokenLine();
+  renderContextLine();
 }
 
 function clearTranscript() {
@@ -754,7 +851,10 @@ function resetChatView() {
   els.empty.hidden = false;
   newChatPending = false;
   chatUsage = null; // a new chat has spent nothing
+  chatContext = null; // and has no request measured yet
+  chatPrompt = null;
   renderTokenLine();
+  renderContextLine();
 }
 
 // -------------------------------------------------------------------------
@@ -784,7 +884,13 @@ function handleEvent(ev) {
       break;
     case "usage":
       chatUsage = addUsage(chatUsage, ev.usage);
+      chatPrompt = ev.usage.input;
       renderTokenLine();
+      renderContextLine();
+      break;
+    case "context":
+      chatContext = { system: ev.system, tools: ev.tools, messages: ev.messages, total: ev.total, budget: ev.budget, window: ev.window };
+      renderContextLine();
       break;
     case "tool_start":
       addToolStart(ev.name, ev.args);
@@ -1724,7 +1830,12 @@ async function openSession(id) {
   newChatPending = false; // otherwise the next send would discard the chat just opened
   const history = res.history || [];
   chatUsage = res.usage || null;
+  // Opening a saved chat has no occupancy reading: the snapshot is the last
+  // request the worker measured, and a chat opened from disk has no such thing.
+  chatContext = null;
+  chatPrompt = null;
   renderTokenLine();
+  renderContextLine();
   if (res.trimmed) addNote(TRIMMED_NOTE, "dot");
   renderHistory(history);
   els.empty.hidden = history.length > 0;

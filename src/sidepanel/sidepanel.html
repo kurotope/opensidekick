@@ -108,6 +108,11 @@
         <!-- Outside the chip: the chip opens Settings, so a number inside it
              would be part of that click. A button, not a span: the breakdown is
              opened by a click, so it has to be focusable and announce its state. -->
+        <!-- Occupancy, not cost: how full the window is right now, as the
+             compaction logic measures it. Its own pill because a sum over calls
+             and a snapshot of the window answer different questions, and this one
+             is short so the header keeps room for the model id. -->
+        <button type="button" id="context-line" class="token-line ctx-line" hidden aria-expanded="false" aria-controls="context-card"></button>
         <button type="button" id="token-line" class="token-line" hidden aria-expanded="false" aria-controls="token-card"></button>
       </div>
     </header>
@@ -115,6 +120,10 @@
     <!-- The breakdown behind the token line. Built on the workflows menu's
          pattern (positioned under the top bar, outside click closes). -->
     <div id="token-card" class="wf-menu token-card" role="dialog" aria-label="Token usage" tabindex="-1" hidden></div>
+
+    <!-- The occupancy breakdown behind the percentage: the three parts a request
+         carries, and the prompt size the server reported for the last call. -->
+    <div id="context-card" class="wf-menu token-card ctx-card" role="dialog" aria-label="Context used" tabindex="-1" hidden></div>
 
     <div id="wf-menu" class="wf-menu" hidden></div>
     <!-- A non-modal dialog, not a menu: rows hold several buttons and an inline

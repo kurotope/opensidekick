@@ -200,6 +200,28 @@ body {
   font-variant-numeric: tabular-nums;
 }
 
+/* The occupancy pill borrows the token pill's look. The warm state is the colour
+   compaction fires near: the pill says the room is running out without the user
+   reading a number. */
+.ctx-line.warm {
+  color: var(--os-warn);
+  border-color: var(--os-warn);
+}
+.ctx-bar {
+  height: 3px;
+  margin: 4px 0 6px;
+  border-radius: 2px;
+  background: var(--os-line-2);
+  overflow: hidden;
+}
+.ctx-fill {
+  height: 100%;
+  background: var(--os-accent);
+}
+.ctx-bar.warm .ctx-fill {
+  background: var(--os-warn);
+}
+
 /* Banners -------------------------------------------------------------- */
 
 .status-bar {
