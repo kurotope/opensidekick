@@ -22,6 +22,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   `prompt_cache_hit_tokens`, Kimi's top-level `cached_tokens`, Anthropic's
   `cache_read_input_tokens`). A server that rejects the request field asking for
   usage is asked again without it, so the task still runs.
+- **Tab groups for the agent's tabs.** The tabs the agent opens go into one Chrome
+  tab group, so you can see at a glance what it opened, and the group's tabs are
+  closed when the chat ends — New chat, Clear history, and deleting the current
+  chat all clean up the same way. Your own tabs are never grouped and never
+  closed. Needs the `tabGroups` permission, which adds "View and manage your tab
+  groups" to the install warning.
 
 ### Fixed
 

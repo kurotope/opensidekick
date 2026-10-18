@@ -41,7 +41,7 @@ import { cleanUsage } from "../common/usage.js";
 import { resolveSource, isNoteworthyChange, featureEnabled, thresholdFor } from "./decisions.js";
 import { runAgent } from "./agent.js";
 import { detachAll } from "./cdp.js";
-import { ensureContentScript } from "./tools.js";
+import { ensureContentScript, closeAgentGroup } from "./tools.js";
 import { applyMigrations } from "./migrations.js";
 
 // -------------------------------------------------------------------------
@@ -163,6 +163,9 @@ async function writeHot() {
 async function resetLive() {
   conversation = [];
   session = null;
+  // The chat's tabs are its footprint: closing them here means New chat, Clear
+  // history and deleting the current chat all clean up the same way.
+  await closeAgentGroup().catch(() => {});
   try {
     await chrome.storage.session.remove([SESSION_CONVO_KEY, SESSION_CONVO_META_KEY]);
   } catch {

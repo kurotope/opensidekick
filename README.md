@@ -65,7 +65,9 @@ genuinely agentic, and usable with any LLM — including fully local models.**
 - **Optional developer tools** — read the page's console messages and network
   requests to debug ("why is this page erroring?"), and a run-JavaScript escape
   hatch for when the other tools aren't enough. Both opt-in in Settings.
-- **Multi-tab** — list, open, and switch tabs to complete a task.
+- **Multi-tab** — list, open, and switch tabs to complete a task. The tabs the
+  agent opens sit in one Chrome tab group, and the group's tabs are closed when
+  the chat ends. Your own tabs are never grouped or closed.
 - **Any provider, any model** via two protocols:
   - OpenAI-compatible (`/chat/completions`): OpenRouter, OpenAI, Google Gemini,
     Groq, Venice AI, Together, DeepSeek, **Ollama**, **LM Studio**, or any

@@ -30,6 +30,7 @@ import {
   COMPACTED_NOTE,
   SESSION_CONVO_KEY,
 } from "../src/common/constants.js";
+import { GROUP_TITLE, GROUP_COLOR } from "../src/common/tabgroups.js";
 
 const EXT_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const IMG_PNG = fs.readFileSync(path.join(EXT_DIR, "icons/icon16.png")); // a real, tiny PNG
@@ -221,6 +222,23 @@ function decide(messages) {
     return { kind: "text", text: `redirect_blocked=${blocked}` };
   }
 
+  // Tab groups: open two tabs, list them, switch back to the user's tab, then
+  // report what the tool results showed. The answer is the evidence that the tab
+  // tools ran and returned — not just that the model asked for them.
+  if (/open two tabs/.test(firstUser)) {
+    if (n === 0) return { kind: "tool", name: "open_tab", args: { url: `${BASE1}/tab1` } };
+    if (n === 1) return { kind: "tool", name: "open_tab", args: { url: `${BASE1}/tab2` } };
+    if (n === 2) return { kind: "tool", name: "list_tabs", args: {} };
+    const tabs = (parsed.find((p) => Array.isArray(p.tabs)) || {}).tabs || [];
+    const opened = tabs.filter((t) => /\/tab\d/.test(t.url || "")).length;
+    const original = tabs.find((t) => /\/page$/.test(t.url || ""));
+    if (n === 3 && original) return { kind: "tool", name: "switch_tab", args: { tab_id: original.tab_id } };
+    // switch_tab's result has the same shape as open_tab's, so the URL is what
+    // tells them apart: only the user's tab ends in /page.
+    const focused = parsed.some((p) => p.tab_id && /\/page$/.test(p.url || ""));
+    return { kind: "text", text: `opened=${opened} focus_page=${focused}` };
+  }
+
   // MCP permission gate: two calls to the same server in one run — the second
   // must not re-prompt once the server is allowed for the session.
   if (/two cities/.test(firstUser)) {
@@ -337,6 +355,12 @@ function startServer() {
       return res.end();
     }
     if (req.url === "/page") {
+      res.writeHead(200, { "content-type": "text/html" });
+      return res.end(TEST_PAGE);
+    }
+    // Two more pages with the same content, so a tab-group run can tell the
+    // tabs the agent opened apart from the tab the user was on.
+    if (req.url === "/tab1" || req.url === "/tab2") {
       res.writeHead(200, { "content-type": "text/html" });
       return res.end(TEST_PAGE);
     }
@@ -2651,6 +2675,70 @@ async function main() {
     const final = await mdProbe(mdPanel);
     check(streamed.html === final.html, `markdown: streamed DOM equals the single-shot DOM (${streamed && final ? (streamed.html === final.html ? "equal" : "differ") : "missing"})`);
     await mdPanel.close();
+
+    // --- Tab groups: the agent's tabs in one group, closed with the chat ---
+    // Read the tab state from the extension's worker, which is the only context
+    // that sees chrome.tabs. Resolved fresh each time: a restarted worker is a
+    // different object, and evaluating on the dead one throws.
+    const curSw = () => context.serviceWorkers().find((w) => w.url().includes(extId));
+    const openedTabs = async () =>
+      curSw().evaluate(async () => {
+        const tabs = await chrome.tabs.query({});
+        return tabs.filter((t) => /\/tab\d/.test(t.url || "")).map((t) => ({ id: t.id, groupId: t.groupId, url: t.url }));
+      });
+    const pageTab = async () =>
+      curSw().evaluate(async () => {
+        const t = (await chrome.tabs.query({})).find((x) => /\/page$/.test(x.url || ""));
+        return t ? { groupId: t.groupId, open: true } : { groupId: -2, open: false };
+      });
+      // stopWorker is already defined above (the compaction block's copy, which
+      // also marks the old worker); the tab-groups checks only need the closing.
+
+    const groupRun = await runTask("Open two tabs and tell me what you did.", true);
+    const groupAnswer = answerOf(groupRun);
+    check(/opened=2/.test(groupAnswer), `tab groups: list_tabs reported both tabs the agent opened (got "${groupAnswer}")`);
+    check(/focus_page=true/.test(groupAnswer), `tab groups: switch_tab moved focus back to the user's tab (got "${groupAnswer}")`);
+
+    const opened1 = await openedTabs();
+    const gid = opened1.length ? opened1[0].groupId : -1;
+    check(opened1.length === 2 && gid > 0, `tab groups: the two tabs the agent opened share one group (groupIds ${JSON.stringify(opened1.map((t) => t.groupId))})`);
+    const gInfo = await curSw().evaluate((g) => chrome.tabGroups.get(g), gid);
+    check(gInfo.title === GROUP_TITLE, `tab groups: the group is titled "${gInfo.title}"`);
+    check(gInfo.color === GROUP_COLOR, `tab groups: the group is coloured "${gInfo.color}"`);
+    const page1 = await pageTab();
+    check(page1.groupId === -1, `tab groups: the user's tab is not in the group (groupId ${page1.groupId})`);
+
+    // New chat closes the group's tabs and leaves the user's tab. A text-only
+    // task is used so the closing is not entangled with page actions.
+    await runTask("What model are you?", true);
+    const opened2 = await openedTabs();
+    check(opened2.length === 0, `tab groups: New chat closed the tabs the agent opened (${opened2.length} left)`);
+    const page2 = await pageTab();
+    check(page2.open, "tab groups: New chat left the user's tab open");
+
+    // A tab the user drags out of the group is theirs: it survives the chat.
+    await runTask("Open two tabs and tell me what you did.", true);
+    const movedGroup = await curSw().evaluate(async () => {
+      const t = (await chrome.tabs.query({})).find((x) => /\/tab1/.test(x.url || ""));
+      return t ? await chrome.tabs.group({ tabIds: [t.id] }) : null;
+    });
+    check(movedGroup !== null, "tab groups: moved one tab out of the group (the state a drag produces)");
+    await runTask("What model are you?", true);
+    const opened3 = await openedTabs();
+    check(
+      opened3.length === 1 && /\/tab1/.test(opened3[0].url),
+      `tab groups: the tab moved out of the group stayed open (${JSON.stringify(opened3.map((t) => t.url))})`,
+    );
+
+    // A worker restart mid-chat must not lose the group: the next worker closes
+    // the tabs it tracked, from chrome.storage.session.
+    await runTask("Open two tabs and tell me what you did.", true);
+    const openedBefore = await openedTabs();
+    check(openedBefore.length === 2, `tab groups: two tabs tracked before the worker restart (${openedBefore.length})`);
+    await stopWorker();
+    await runTask("What model are you?", true);
+    const opened4 = await openedTabs();
+    check(opened4.length === 0, `tab groups: the restarted worker closed the tracked tabs (${opened4.length} left)`);
   } finally {
     server2.close();
     await context.close();
