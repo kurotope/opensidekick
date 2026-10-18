@@ -14,7 +14,7 @@ import {
   TRIMMED_NOTE,
 } from "../common/constants.js";
 import { matchPrompts, isSlashQuery } from "../common/prompts.js";
-import { cacheHitText, uncachedInput } from "../common/usage.js";
+import { cacheHitText, uncachedInput, addUsage } from "../common/usage.js";
 import { relativeTime } from "../background/sessions.js";
 
 const els = {
@@ -598,12 +598,7 @@ function handleEvent(ev) {
       endAssistant(ev.content);
       break;
     case "usage":
-      chatUsage = {
-        input: (chatUsage ? chatUsage.input : 0) + ev.input,
-        output: (chatUsage ? chatUsage.output : 0) + ev.output,
-        cached: (chatUsage && chatUsage.cached ? chatUsage.cached : 0) + (ev.cached || 0),
-        write: (chatUsage && chatUsage.write ? chatUsage.write : 0) + (ev.write || 0),
-      };
+      chatUsage = addUsage(chatUsage, ev.usage);
       renderTokenLine();
       break;
     case "tool_start":

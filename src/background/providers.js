@@ -19,6 +19,8 @@
 // Normalized tool definition:
 //   { name, description, parameters: <JSON Schema object> }
 
+import { cleanUsage } from "../common/usage.js";
+
 const ANTHROPIC_VERSION = "2023-06-01";
 
 /**
@@ -574,16 +576,21 @@ async function* sseStream(res) {
  * first turn that writes the cache looks like a pure miss without it. Null when
  * nothing usable is reported, so the UI can say "no counts from this server"
  * instead of showing zeros.
+ *
+ * This function only reads the names. What counts as a token, and the clamps
+ * that keep cached and write inside input, live in usage.js, so the provider
+ * layer and the storage boundary share one set of rules.
  */
 function normalizeUsage(raw) {
   if (!raw || typeof raw !== "object") return null;
-  const n = (v) => (Number.isFinite(v) && v >= 0 ? v : 0);
+  // A plain read, not a validator: cleanUsage decides what is a token count, and
+  // the guard here is only so a missing Anthropic field does not make the sum NaN.
+  const num = (v) => (typeof v === "number" ? v : 0);
   const input =
-    n(raw.prompt_tokens) ||
-    n(raw.prompt_eval_count) ||
-    (n(raw.input_tokens) + n(raw.cache_read_input_tokens) + n(raw.cache_creation_input_tokens));
-  const output = n(raw.completion_tokens) || n(raw.eval_count) || n(raw.output_tokens);
-  if (!input && !output) return null;
+    num(raw.prompt_tokens) ||
+    num(raw.prompt_eval_count) ||
+    (num(raw.input_tokens) + num(raw.cache_read_input_tokens) + num(raw.cache_creation_input_tokens));
+  const output = num(raw.completion_tokens) || num(raw.eval_count) || num(raw.output_tokens);
   // Cache reads are named four ways: OpenAI and OpenRouter nest cached_tokens in
   // prompt_tokens_details, DeepSeek and Groq put a hit count at the top level,
   // Kimi documents a top-level cached_tokens on the final usage chunk, and
@@ -591,12 +598,10 @@ function normalizeUsage(raw) {
   // a server that has none reports 0. Writes are named two ways: OpenRouter's
   // cache_write_tokens, Anthropic's cache_creation_input_tokens.
   const details = raw.prompt_tokens_details;
-  const cached = Math.min(
-    n(details && details.cached_tokens) || n(raw.prompt_cache_hit_tokens) || n(raw.cached_tokens) || n(raw.cache_read_input_tokens),
-    input,
-  );
-  const write = Math.min(n(details && details.cache_write_tokens) || n(raw.cache_creation_input_tokens), input - cached);
-  return { input, output, cached, write };
+  const cached =
+    num(details && details.cached_tokens) || num(raw.prompt_cache_hit_tokens) || num(raw.cached_tokens) || num(raw.cache_read_input_tokens);
+  const write = num(details && details.cache_write_tokens) || num(raw.cache_creation_input_tokens);
+  return cleanUsage({ input, output, cached, write });
 }
 
 // Anthropic reports input in message_start and output cumulatively in
@@ -604,12 +609,15 @@ function normalizeUsage(raw) {
 function mergeUsage(a, b) {
   if (!a) return b;
   if (!b) return a;
-  return {
+  // The fields a server did not report are absent, not 0, so the guards are
+  // needed: Math.max(undefined, 5000) is NaN. cleanUsage re-applies the rules to
+  // the merged snapshot, so a merged zero cache stays out of the shape.
+  return cleanUsage({
     input: Math.max(a.input, b.input),
     output: Math.max(a.output, b.output),
-    cached: Math.max(a.cached, b.cached),
-    write: Math.max(a.write, b.write),
-  };
+    cached: Math.max(a.cached || 0, b.cached || 0),
+    write: Math.max(a.write || 0, b.write || 0),
+  });
 }
 
 function safeParseArgs(str) {

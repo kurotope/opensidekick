@@ -3,7 +3,7 @@
 // browser test is bad at checking that a meter never rounds a partial hit to
 // 100%, and a node check is good at it.
 
-import { cleanUsage, cacheHitText, uncachedInput } from "../src/common/usage.js";
+import { cleanUsage, cacheHitText, uncachedInput, addUsage } from "../src/common/usage.js";
 
 let fail = 0;
 const ok = (c, m) => { console.log((c ? "ok  : " : "FAIL: ") + m); if (!c) fail = 1; };
@@ -15,7 +15,7 @@ ok(cleanUsage({ input: 0, output: 0 }) === null, "cleanUsage: zeros are no count
 ok(cleanUsage(null) === null, "cleanUsage: null in, null out");
 ok(cleanUsage("1200 tok") === null, "cleanUsage: a string is not counts");
 ok(same(cleanUsage({ input: 120, output: -5 }), { input: 120, output: 0 }), "cleanUsage: negative dropped to 0");
-ok(same(cleanUsage({ input: 120.5, output: 34 }), { input: 0, output: 34 }), "cleanUsage: non-integer dropped to 0");
+ok(same(cleanUsage({ input: 120.5, output: 34 }), { input: 121, output: 34 }), "cleanUsage: a fractional count is rounded, not dropped (the live pill and the saved chat agree)");
 ok(same(cleanUsage({ input: 500, output: 0 }), { input: 500, output: 0 }), "cleanUsage: output-only counts kept");
 
 // ---- cached / write: the cache slices of input ----
@@ -33,6 +33,13 @@ ok(same(cleanUsage({ input: 100, output: 5, write: "many" }), { input: 100, outp
 ok(uncachedInput({ input: 1000, cached: 800, write: 100 }) === 100, "uncachedInput: reads and writes both subtracted");
 ok(uncachedInput({ input: 1000, cached: 400 }) === 600, "uncachedInput: no write bucket");
 ok(uncachedInput({ input: 1000 }) === 1000, "uncachedInput: no cache data means all input is uncached");
+
+// ---- addUsage: the chat's running total ----
+ok(same(addUsage(null, { input: 120, output: 34, cached: 0, write: 0 }), { input: 120, output: 34, cached: 0, write: 0 }), "addUsage: first call from no total");
+ok(same(addUsage({ input: 10, output: 2, cached: 0, write: 0 }, null), { input: 10, output: 2, cached: 0, write: 0 }), "addUsage: a call that reported nothing leaves the total");
+ok(same(addUsage({ input: 10, output: 2, cached: 5, write: 1 }, { input: 20, output: 3, cached: 15, write: 4 }), { input: 30, output: 5, cached: 20, write: 5 }), "addUsage: all four fields add");
+ok(same(addUsage({ input: 10, output: 2 }, { input: 20, output: 3, cached: 15, write: 4 }), { input: 30, output: 5, cached: 15, write: 4 }), "addUsage: a total with no cache fields takes a later call's cache data");
+ok(same(addUsage({ input: 10, output: 2, cached: 5, write: 0 }, { input: 20, output: 3 }), { input: 30, output: 5, cached: 5, write: 0 }), "addUsage: the total keeps its zeros, so a later call's cache data is not read as the total's own");
 
 // ---- cacheHitText: the share the user reads ----
 ok(cacheHitText({ input: 1000, output: 20 }) === null, "cacheHitText: no cache data says nothing");
