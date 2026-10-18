@@ -2730,6 +2730,15 @@ async function main() {
       `tab groups: the tab moved out of the group stayed open (${JSON.stringify(opened3.map((t) => t.url))})`,
     );
 
+    // Close the survivor before the restart block. The mock opens the same two
+    // URLs on every run, so a surviving tab from the drag test is counted as one
+    // of the next run's tabs and the restart checks would be counting the wrong
+    // tabs.
+    await curSw().evaluate(async () => {
+      const t = (await chrome.tabs.query({})).find((x) => /\/tab1/.test(x.url || ""));
+      if (t) await chrome.tabs.remove(t.id);
+    });
+
     // A worker restart mid-chat must not lose the group: the next worker closes
     // the tabs it tracked, from chrome.storage.session.
     await runTask("Open two tabs and tell me what you did.", true);
