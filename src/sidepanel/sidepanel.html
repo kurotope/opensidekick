@@ -60,6 +60,9 @@
       <symbol id="ic-send" viewBox="0 0 24 24">
         <path d="M12 19V5M5.5 11.5 12 5l6.5 6.5" />
       </symbol>
+      <symbol id="ic-attach" viewBox="0 0 24 24">
+        <path d="M20 11.5l-8.5 8.5a5.5 5.5 0 0 1-7.8-7.8l8.5-8.5a5.5 5.5 0 0 1 7.8 7.8l-8.5 8.5a2.75 2.75 0 0 1-3.9-3.9l7.8-7.8" />
+      </symbol>
       <symbol id="ic-history" viewBox="0 0 24 24">
         <path d="M4.5 12a7.5 7.5 0 1 0 2.4-5.5" />
         <path d="M4.2 4.8v3.4h3.4" />
@@ -146,8 +149,20 @@
       <!-- The field is the focal object: Send lives inside it, and the
            approval control sits directly underneath. -->
       <div class="composer-field">
+        <!-- Pending attachments. The strip is empty and hidden until a paste,
+             drop, or pick adds something, so the composer stays quiet. -->
+        <div id="attach-strip" class="attach-strip" hidden></div>
         <textarea id="input" rows="2" placeholder="Ask about or act on this page…"></textarea>
         <div class="composer-bar">
+          <button
+            type="button"
+            id="attach-btn"
+            class="attach-btn icon-btn"
+            aria-label="Attach image"
+            title="Attach an image — paste, drop, or click"
+          >
+            <svg class="ic" aria-hidden="true"><use href="#ic-attach" /></svg>
+          </button>
           <span class="composer-hint"><kbd>/</kbd> saved prompts</span>
           <div class="composer-buttons">
             <button type="button" id="stop-btn" class="stop-btn" hidden>
@@ -160,6 +175,16 @@
           </div>
         </div>
       </div>
+      <!-- The picker is the file path; the button opens it. Images only, so the
+           OS picker greys out everything else. -->
+      <input
+        type="file"
+        id="attach-input"
+        accept="image/png,image/jpeg,image/webp,image/gif"
+        multiple
+        hidden
+        aria-label="Attach image files"
+      />
       <div class="composer-row">
         <span class="composer-label" aria-hidden="true">Approval</span>
         <div

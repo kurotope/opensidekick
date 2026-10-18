@@ -90,8 +90,34 @@ await callModel(
 const ai = captured.messages;
 // The two user messages merge into one Anthropic user turn.
 eq(ai.length, 1, "anthropic image: user turns merged");
-eq(ai[0].content[1], { type: "text", text: "Here is the screenshot:" }, "anthropic image: text block");
-eq(ai[0].content[2], { type: "image", source: { type: "base64", media_type: "image/png", data: "AAAB" } }, "anthropic image: base64 image block");
+// Images come before the text of their turn: Anthropic documents that images
+// placed before the query perform best.
+eq(ai[0].content[1], { type: "image", source: { type: "base64", media_type: "image/png", data: "AAAB" } }, "anthropic image: base64 image block before its text");
+eq(ai[0].content[2], { type: "text", text: "Here is the screenshot:" }, "anthropic image: text block after the image");
+
+// ---- Composer attachment as the FIRST turn ----
+// A pasted image with its question is the whole conversation. Anthropic wants
+// messages[0] to be a user turn, and the image has to ride in that same turn.
+const attachFirst = [{ role: "user", content: "what's in this image?", images: [{ mediaType: "image/jpeg", data: "QUJD" }] }];
+
+await callModel(
+  { type: "openai", baseUrl: "https://x/v1", apiKey: "k" },
+  { model: "m", messages: attachFirst, tools: [] },
+);
+const of = captured.messages;
+eq(of.length, 1, "openai attachment: one message, no system prompt");
+eq(of[0].role, "user", "openai attachment: first user turn keeps its role");
+eq(of[0].content[1].image_url.url, "data:image/jpeg;base64,QUJD", "openai attachment: the pasted image reaches the request");
+
+await callModel(
+  { type: "anthropic", baseUrl: "https://api.anthropic.com/v1", apiKey: "k" },
+  { model: "claude", maxTokens: 100, messages: attachFirst, tools: [] },
+);
+const af = captured.messages;
+eq(af.length, 1, "anthropic attachment: one user turn");
+eq(af[0].role, "user", "anthropic attachment: the first turn is a user turn");
+eq(af[0].content[0].type, "image", "anthropic attachment: the image is the first block");
+eq(af[0].content[1].text, "what's in this image?", "anthropic attachment: the question follows the image");
 
 // ---- Compacted conversation shape ----
 // After compaction the summary sits at the front and the tail starts with a user

@@ -53,7 +53,9 @@ const item = (id, updatedAt, extra = {}) => ({ id, title: "chat " + id, createdA
     user("pic", { images: [{ mediaType: "image/png", data: "x" }] }),
     asst("I see a chart."),
   ]);
-  ok(same(v, [user("Look at this"), asst("I see a chart.")]), "visibleTurns: drops internal and image-carrying user messages");
+  // The words the user typed with a pasted image are kept; the image is not.
+  ok(same(v, [user("Look at this"), user("pic"), asst("I see a chart.")]), "visibleTurns: keeps an attachment's text, drops internal turns");
+  ok(v.every((m) => !m.images), "visibleTurns: no image reaches History");
 }
 {
   const v = visibleTurns([user("Do it"), asst("  ", { toolCalls: [{ name: "finish", args: { summary: "Typed it." } }] })]);

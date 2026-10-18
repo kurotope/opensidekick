@@ -15,6 +15,7 @@ import {
   COMPACTED_NOTE,
 } from "../common/constants.js";
 import { matchPrompts, isSlashQuery } from "../common/prompts.js";
+import { classifyFile, targetSize, acceptImage, ATTACH_NOTES } from "../common/attachments.js";
 import { escapeHtml } from "../common/escape.js";
 import { markdownToHtml, createStreamingRenderer, CODE_CLASS, setHighlighter } from "../common/markdown.js";
 import { relativeTime } from "../background/sessions.js";
@@ -37,6 +38,10 @@ const els = {
   notConfigured: document.getElementById("not-configured"),
   input: document.getElementById("input"),
   composer: document.getElementById("composer"),
+  composerField: document.querySelector(".composer-field"),
+  attach: document.getElementById("attach-btn"),
+  attachInput: document.getElementById("attach-input"),
+  attachStrip: document.getElementById("attach-strip"),
   send: document.getElementById("send-btn"),
   stop: document.getElementById("stop-btn"),
   newChat: document.getElementById("new-chat"),
@@ -161,6 +166,27 @@ async function init() {
     scroll();
   });
   els.composer.addEventListener("submit", onSubmit);
+  els.attach.addEventListener("click", () => els.attachInput.click());
+  els.attachInput.addEventListener("change", () => {
+    addFiles(els.attachInput.files);
+    els.attachInput.value = ""; // so picking the same file twice works
+  });
+  // Paste and drop are the two paths a screenshot takes from the clipboard to
+  // the composer without leaving the keyboard.
+  els.input.addEventListener("paste", (e) => {
+    const files = e.clipboardData && e.clipboardData.files;
+    if (!files || !files.length) return;
+    e.preventDefault();
+    addFiles(files);
+  });
+  els.composer.addEventListener("dragover", (e) => {
+    if (e.dataTransfer && e.dataTransfer.types.includes("Files")) e.preventDefault();
+  });
+  els.composer.addEventListener("drop", (e) => {
+    if (!e.dataTransfer || !e.dataTransfer.files.length) return;
+    e.preventDefault();
+    addFiles(e.dataTransfer.files);
+  });
   els.input.addEventListener("keydown", onInputKeydown);
   els.input.addEventListener("input", () => {
     // Editing a recalled prompt ends history browsing (the edited text stays).
@@ -452,7 +478,8 @@ async function setSiteRule(origin, rule) {
 async function onSubmit(e) {
   e.preventDefault();
   const text = els.input.value.trim();
-  if (!text || running) return;
+  const images = pendingImages.slice();
+  if ((!text && !images.length) || running) return;
   if (!configured) {
     // First-run gate: no model yet — send them to Settings instead of failing.
     els.empty.hidden = false;
@@ -461,15 +488,23 @@ async function onSubmit(e) {
     return;
   }
   els.empty.hidden = true;
-  rememberPrompt(text);
+  if (text) rememberPrompt(text);
   exitHistory();
+  // An image with no words still needs a task line: Anthropic rejects an empty
+  // text block, and a bare image gives the model nothing to act on.
+  const task = text || "Describe what you see in the attached image.";
   // The user bubble is rendered from the worker's `user_echo` event so that
-  // runs triggered by anything (composer, context menu) show consistently.
+  // runs triggered by anything (composer, context menu) show consistently. The
+  // thumbnails come from this panel's own copy, so the worker does not have to
+  // echo megabytes of base64 back.
+  lastSentImages = images;
   els.input.value = "";
+  pendingImages = [];
+  renderAttachStrip();
   autoGrow();
   refreshContextHint();
   const wasPending = newChatPending;
-  const reply = send({ type: MSG.RUN_TASK, task: text, newChat: wasPending });
+  const reply = send({ type: MSG.RUN_TASK, task, images, newChat: wasPending });
   newChatPending = false;
   setRunning(true);
   // Stop, New chat, then a quick send can land while the stopped run is still
@@ -480,10 +515,120 @@ async function onSubmit(e) {
       els.input.value = text;
       autoGrow();
     }
+    // The thumbnails go back too: a send that never started must not silently
+    // throw away the image the user just pasted.
+    if (!pendingImages.length) {
+      pendingImages = images;
+      renderAttachStrip();
+    }
+    lastSentImages = [];
     newChatPending = wasPending;
     els.empty.hidden = !!els.messages.querySelector(".msg");
     setRunning(false);
   }
+}
+
+// --- Composer attachments -----------------------------------------------------
+
+// Images waiting to be sent, as { mediaType, data } — the same shape the
+// screenshot tool produces and the provider layer already converts.
+let pendingImages = [];
+let lastSentImages = [];
+
+// The strip is rebuilt from pendingImages on every change: a list of thumbnails
+// each with its own remove button.
+function renderAttachStrip() {
+  els.attachStrip.innerHTML = "";
+  for (const [i, img] of pendingImages.entries()) {
+    const chip = document.createElement("div");
+    chip.className = "att-chip";
+    const thumb = document.createElement("img");
+    thumb.className = "att-thumb";
+    thumb.src = `data:${img.mediaType};base64,${img.data}`;
+    thumb.alt = `Attachment ${i + 1}`;
+    const rm = document.createElement("button");
+    rm.type = "button";
+    rm.className = "att-remove";
+    rm.setAttribute("aria-label", `Remove attachment ${i + 1}`);
+    rm.textContent = "×";
+    rm.addEventListener("click", () => {
+      pendingImages.splice(i, 1);
+      renderAttachStrip();
+    });
+    chip.append(thumb, rm);
+    els.attachStrip.appendChild(chip);
+  }
+  els.attachStrip.hidden = pendingImages.length === 0;
+  // Send looks live when there is something to send, even with no text typed.
+  els.composerField.classList.toggle("has-attachments", pendingImages.length > 0);
+}
+
+// One entry point for paste, drop and the picker, so all three get the same
+// checks and the same note wording.
+async function addFiles(files) {
+  for (const f of Array.from(files || [])) {
+    const r = classifyFile(f, pendingImages.length);
+    if (!r.ok) {
+      addNote(ATTACH_NOTES[r.reason], "dot");
+      continue;
+    }
+    const img = await fileToImage(f);
+    if (!img) {
+      addNote(ATTACH_NOTES.type, "dot");
+      continue;
+    }
+    const a = acceptImage(img);
+    if (!a.ok) {
+      addNote(ATTACH_NOTES[a.reason], "dot");
+      continue;
+    }
+    pendingImages.push(img);
+    renderAttachStrip();
+    els.input.focus();
+  }
+}
+
+// Encode a file to { mediaType, data }, downscaled to MAX_LONG_EDGE. A file that
+// is already small enough is kept as its own bytes: re-encoding a lossless PNG
+// screenshot costs quality for nothing.
+async function fileToImage(file) {
+  const url = URL.createObjectURL(file);
+  try {
+    const img = new Image();
+    await new Promise((res, rej) => {
+      img.onload = res;
+      img.onerror = rej;
+      img.src = url;
+    });
+    const { width, height } = targetSize(img.naturalWidth, img.naturalHeight);
+    if (width === img.naturalWidth && height === img.naturalHeight) {
+      const dataUrl = await readAsDataUrl(file);
+      const comma = dataUrl.indexOf(",");
+      return { mediaType: file.type.toLowerCase(), data: dataUrl.slice(comma + 1) };
+    }
+    const canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+    canvas.getContext("2d").drawImage(img, 0, 0, width, height);
+    // PNG stays PNG (and GIF becomes PNG, keeping the first frame lossless);
+    // JPEG and WebP re-encode as JPEG, which every provider reads.
+    const outType = file.type === "image/jpeg" || file.type === "image/webp" ? "image/jpeg" : "image/png";
+    const dataUrl = canvas.toDataURL(outType, 0.92);
+    return { mediaType: outType, data: dataUrl.slice(dataUrl.indexOf(",") + 1) };
+  } catch {
+    return null; // a corrupt or unreadable file reads as "not an image"
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
+function readAsDataUrl(file) {
+  return new Promise((res, rej) => {
+    const fr = new FileReader();
+    fr.onload = () => res(String(fr.result));
+    fr.onerror = rej;
+    fr.readAsDataURL(file);
+  });
 }
 
 function newChat() {
@@ -492,6 +637,10 @@ function newChat() {
   clearTranscript();
   els.empty.hidden = false;
   newChatPending = true;
+  // Attachments belong to the chat being cleared, not to the next one.
+  pendingImages = [];
+  lastSentImages = [];
+  renderAttachStrip();
 }
 
 function clearTranscript() {
@@ -524,7 +673,8 @@ function handleEvent(ev) {
       break;
     case "user_echo":
       els.empty.hidden = true;
-      addUserMessage(ev.text);
+      addUserMessage(ev.text, lastSentImages);
+      lastSentImages = [];
       break;
     case "assistant_start":
       startAssistant();
@@ -599,11 +749,18 @@ function setRunning(v) {
 // -------------------------------------------------------------------------
 // Rendering
 // -------------------------------------------------------------------------
-function addUserMessage(text) {
+function addUserMessage(text, images) {
   sealLog();
   const el = document.createElement("div");
   el.className = "msg user";
   el.textContent = text;
+  for (const img of images || []) {
+    const thumb = document.createElement("img");
+    thumb.className = "att-thumb sent";
+    thumb.src = `data:${img.mediaType};base64,${img.data}`;
+    thumb.alt = "Attached image";
+    el.appendChild(thumb);
+  }
   els.messages.appendChild(el);
   scroll();
 }

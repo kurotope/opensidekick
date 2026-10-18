@@ -1252,6 +1252,67 @@ body {
   margin-left: auto;
 }
 
+/* Pending attachments: a strip of thumbnails above the field, each with its own
+   remove. The strip is hidden until something is attached, so the composer
+   stays quiet for the text-only case that is most of the traffic. */
+.attach-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 8px 12px 0;
+}
+.att-chip {
+  position: relative;
+  width: 56px;
+  height: 56px;
+}
+.att-thumb {
+  display: block;
+  width: 56px;
+  height: 56px;
+  object-fit: cover;
+  border-radius: var(--os-r);
+  border: 1px solid var(--os-line-strong);
+  background: var(--os-sunken);
+}
+.att-remove {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border-radius: 50%;
+  border: 1px solid var(--os-line-2);
+  background: var(--os-surface);
+  color: var(--os-ink-soft);
+  font-size: var(--os-fs-12);
+  line-height: 1;
+  cursor: pointer;
+}
+.att-remove:hover {
+  background: var(--os-hover);
+  color: var(--os-ink);
+}
+/* The same image inside the user's bubble: full width up to the bubble, not a
+   fixed square, so a screenshot is readable where it was sent. */
+.msg.user .att-thumb.sent {
+  width: auto;
+  height: auto;
+  max-width: 100%;
+  max-height: 200px;
+  margin-top: 6px;
+  border: 1px solid var(--os-line);
+}
+.attach-btn {
+  flex: 0 0 auto;
+  margin-left: -4px;
+}
+.attach-btn .ic {
+  width: 16px;
+  height: 16px;
+}
+
 .send-btn {
   width: 32px;
   height: 32px;
@@ -1268,6 +1329,12 @@ body {
 .composer-field:has(textarea:placeholder-shown) .send-btn:hover:not(:disabled) {
   background: var(--os-sunken);
   color: var(--os-muted);
+}
+/* An image with nothing typed is still something to send, so Send stays live. */
+.composer-field.has-attachments .send-btn,
+.composer-field.has-attachments .send-btn:hover:not(:disabled) {
+  background: var(--os-accent);
+  color: var(--os-on-accent);
 }
 
 .stop-btn {
