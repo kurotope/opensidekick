@@ -89,6 +89,13 @@ const hitSrv = await serve((o, res) =>
 const r8 = await callModel(openaiFor(hitSrv), { model: "m", messages: [{ role: "user", content: "hi" }] });
 eq(r8.usage, { input: 600, output: 12, cached: 512 }, "top-level prompt_cache_hit_tokens read (DeepSeek/Groq shape)");
 
+// Kimi documents the hit count as a top-level cached_tokens on the final chunk.
+const kimiSrv = await serve((o, res) =>
+  sse(res, [...say("kimi"), { usage: { prompt_tokens: 800, completion_tokens: 30, cached_tokens: 640 } }]),
+);
+const r8b = await callModel(openaiFor(kimiSrv), { model: "m", messages: [{ role: "user", content: "hi" }] });
+eq(r8b.usage, { input: 800, output: 30, cached: 640 }, "top-level cached_tokens read (Kimi shape)");
+
 // A server claiming more cached than input: a slice can't exceed the whole.
 const overSrv = await serve((o, res) =>
   sse(res, [...say("over"), { usage: { prompt_tokens: 100, completion_tokens: 5, prompt_tokens_details: { cached_tokens: 400 } } }]),

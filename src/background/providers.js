@@ -582,13 +582,14 @@ function normalizeUsage(raw) {
     (n(raw.input_tokens) + n(raw.cache_read_input_tokens) + n(raw.cache_creation_input_tokens));
   const output = n(raw.completion_tokens) || n(raw.eval_count) || n(raw.output_tokens);
   if (!input && !output) return null;
-  // Cache reads are named three ways too: OpenAI and OpenRouter nest
-  // cached_tokens in prompt_tokens_details, DeepSeek and Groq put a hit count
-  // at the top level, Anthropic calls it cache_read_input_tokens. Reading all
-  // three costs nothing — a server that has none reports 0.
+  // Cache reads are named four ways: OpenAI and OpenRouter nest cached_tokens in
+  // prompt_tokens_details, DeepSeek and Groq put a hit count at the top level,
+  // Kimi documents a top-level cached_tokens on the final usage chunk, and
+  // Anthropic calls it cache_read_input_tokens. Reading all four costs nothing —
+  // a server that has none reports 0.
   const details = raw.prompt_tokens_details;
   const cached = Math.min(
-    n(details && details.cached_tokens) || n(raw.prompt_cache_hit_tokens) || n(raw.cache_read_input_tokens),
+    n(details && details.cached_tokens) || n(raw.prompt_cache_hit_tokens) || n(raw.cached_tokens) || n(raw.cache_read_input_tokens),
     input,
   );
   return { input, output, cached };
