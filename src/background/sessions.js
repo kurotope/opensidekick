@@ -124,6 +124,19 @@ export function emptyIndex() {
 
 const str = (v) => (typeof v === "string" && v ? v : null);
 
+/**
+ * Token counts a chat has used, in one shape: { input, output } or null.
+ * Storage hands back anything, so junk counts are dropped rather than shown:
+ * a number that is not a non-negative integer is not a token count.
+ */
+export function cleanUsage(u) {
+  if (!u || typeof u !== "object") return null;
+  const n = (v) => (Number.isInteger(v) && v >= 0 ? v : 0);
+  const input = n(u.input);
+  const output = n(u.output);
+  return input || output ? { input, output } : null;
+}
+
 // Tolerant of anything storage hands back: a malformed item is dropped rather
 // than taking the whole list down with it.
 export function readIndex(raw) {
@@ -137,6 +150,7 @@ export function readIndex(raw) {
       updatedAt: i.updatedAt,
       model: str(i.model),
       provider: str(i.provider),
+      usage: cleanUsage(i.usage),
     }))
     .sort((a, b) => b.updatedAt - a.updatedAt);
   const seen = new Set();
@@ -147,8 +161,9 @@ export function readIndex(raw) {
 
 export function upsertSession(index, entry, { max = SESSIONS_MAX } = {}) {
   const existing = index.items.find((i) => i.id === entry.id);
+  const usage = cleanUsage(entry.usage);
   const item = existing
-    ? { ...existing, updatedAt: entry.updatedAt, model: entry.model, provider: entry.provider }
+    ? { ...existing, updatedAt: entry.updatedAt, model: entry.model, provider: entry.provider, usage }
     : {
         id: entry.id,
         title: entry.title,
@@ -156,6 +171,7 @@ export function upsertSession(index, entry, { max = SESSIONS_MAX } = {}) {
         updatedAt: entry.updatedAt,
         model: entry.model,
         provider: entry.provider,
+        usage,
       };
   const rest = index.items.filter((i) => i.id !== entry.id).sort((a, b) => b.updatedAt - a.updatedAt);
   const keep = Math.max(0, max - 1);
@@ -189,7 +205,7 @@ export function reconcileIndex(index, bodyIds) {
 // Everything the end-of-run save writes, decided in one place. `trimmed` is
 // whether an earlier save already dropped old exchanges (a chat restored from
 // a trimmed body has lost them for good, even if it now fits).
-export function planSave({ index, sessionId, sensitive, conversation, isCurrent, keepHistory, now, model, provider, trimmed = false }) {
+export function planSave({ index, sessionId, sensitive, conversation, isCurrent, keepHistory, now, model, provider, usage, trimmed = false }) {
   const nothing = { index: null, body: null, removeIds: [] };
   if (!keepHistory) return nothing;
   const listed = index.items.some((i) => i.id === sessionId);
@@ -205,6 +221,9 @@ export function planSave({ index, sessionId, sensitive, conversation, isCurrent,
     updatedAt: now,
     model: str(model),
     provider: str(provider),
+    // The chat's running total, not this run's delta: the worker keeps the
+    // total on the live chat and adds each provider call's counts to it.
+    usage,
   });
   let currentId = isCurrent ? sessionId : up.index.currentId;
   if (!up.index.items.some((i) => i.id === currentId)) currentId = null;

@@ -135,6 +135,20 @@ body {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+/* Token counts for the chat, beside the chip. Mono so the digits line up with
+   the model id, muted so it reads as a count and not as a control. */
+.token-line {
+  align-self: center;
+  flex: 0 1 auto;
+  min-width: 0;
+  padding-left: 8px;
+  color: var(--os-muted);
+  font-family: var(--os-mono);
+  font-size: var(--os-fs-12);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 
 /* Banners -------------------------------------------------------------- */
 
@@ -315,6 +329,11 @@ body {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
+  font-family: var(--os-mono);
+}
+/* Token count per saved chat: never truncated, it is the shortest item in the row. */
+.hist-tokens {
+  flex: 0 0 auto;
   font-family: var(--os-mono);
 }
 .hist-item .icon-btn {

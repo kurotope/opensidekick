@@ -102,6 +102,9 @@
            room beside them for a model id to be readable. -->
       <div id="model-line" class="model-line" hidden>
         <button type="button" id="model-chip" class="chip model-chip"><span class="mc-model"></span><span class="mc-sep" aria-hidden="true">·</span><span class="mc-provider"></span></button>
+        <!-- Outside the chip: the chip opens Settings, so a number inside it
+             would be part of that click. -->
+        <span id="token-line" class="token-line" hidden></span>
       </div>
     </header>
 

@@ -144,7 +144,9 @@ export async function runAgent(deps) {
     emit({ kind: "planning" });
     let plan = null;
     try {
-      plan = await makePlan(provider, config, conversation, signal, identity.plan);
+      plan = await makePlan(provider, config, conversation, signal, identity.plan, (u) =>
+        emit({ kind: "usage", input: u.input, output: u.output }),
+      );
     } catch {
       plan = null; // if planning fails, fall through and run normally
     }
@@ -226,6 +228,9 @@ export async function runAgent(deps) {
       toolCalls: result.toolCalls,
     });
     emit({ kind: "assistant_end", content: result.content || "" });
+    // Token counts for this provider call, once per call: a turn with 12 tool
+    // calls is 12 calls, and the chat total is the sum.
+    if (result.usage) emit({ kind: "usage", input: result.usage.input, output: result.usage.output });
 
     if (!result.toolCalls || result.toolCalls.length === 0) {
       emit({ kind: "done" });
@@ -554,7 +559,7 @@ const PLAN_SYSTEM = `The user has asked you to do something in their browser. Be
 {"summary": "one sentence describing what you'll do", "steps": ["3 to 7 short high-level steps"], "domains": ["website hostnames you expect to use, e.g. example.com"], "needs_actions": true or false}
 Set needs_actions to false only if you can answer the user directly without acting on any page.`;
 
-async function makePlan(provider, config, conversation, signal, identity = "") {
+async function makePlan(provider, config, conversation, signal, identity = "", onUsage) {
   const res = await callModel(provider, {
     model: config.activeModel,
     system: identity + PLAN_SYSTEM,
@@ -564,6 +569,9 @@ async function makePlan(provider, config, conversation, signal, identity = "") {
     temperature: config.settings.temperature,
     signal,
   });
+  // The plan request is a real provider call, so its tokens belong to the chat
+  // total even when the plan is declined.
+  if (res.usage && onUsage) onUsage(res.usage);
   return parsePlan(res.content);
 }
 

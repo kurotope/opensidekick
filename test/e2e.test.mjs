@@ -224,12 +224,17 @@ function probeKind(bodyObj) {
   return null;
 }
 
+// Every mock reply reports the same token counts, so the chat total is a fixed
+// multiple of the number of provider calls and the checks can name the number.
+const MOCK_USAGE = { usage: { prompt_tokens: 1200, completion_tokens: 45 } };
+
 function sseText(res, text) {
   res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", "access-control-allow-origin": "*" });
   const send = (o) => res.write("data: " + JSON.stringify(o) + "\n\n");
   send({ choices: [{ delta: { role: "assistant" } }] });
   send({ choices: [{ delta: { content: text } }] });
   send({ choices: [{ finish_reason: "stop" }] });
+  send(MOCK_USAGE); // the usage chunk carries no choices, like a real server's
   res.write("data: [DONE]\n\n");
   res.end();
 }
@@ -246,6 +251,7 @@ function sseTextStalled(res, text, stallMs) {
     if (res.destroyed || res.writableEnded) return;
     send({ choices: [{ delta: { content: text.slice(mid) } }] });
     send({ choices: [{ finish_reason: "stop" }] });
+    send(MOCK_USAGE);
     res.write("data: [DONE]\n\n");
     res.end();
   }, stallMs);
@@ -265,6 +271,7 @@ function sseToolCall(res, id, name, argsObj) {
   send({ choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: args.slice(0, mid) } }] } }] });
   send({ choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: args.slice(mid) } }] } }] });
   send({ choices: [{ finish_reason: "tool_calls" }] });
+  send(MOCK_USAGE);
   res.write("data: [DONE]\n\n");
   res.end();
 }
@@ -2123,6 +2130,47 @@ async function main() {
 
     // Restore the standard config for the remaining tests.
     await optPage.evaluate(([key, cfg]) => chrome.storage.local.set({ [key]: cfg }), [STORAGE_KEY, config]);
+
+    // --- Token counts (cost meter) ---
+    // The mock reports 1200 in / 45 out on every provider call, so the chat's
+    // total is a known number: the model line, the saved chat, the history row
+    // and a reopened chat all have to agree.
+    const tokPanel = await context.newPage();
+    await tokPanel.goto(`chrome-extension://${extId}/src/sidepanel/sidepanel.html`, { waitUntil: "load" });
+    await tokPanel.waitForTimeout(400);
+    await tokPanel.click("#new-chat");
+    await tokPanel.waitForTimeout(300);
+    const tokenText = (pg) => pg.$eval("#token-line", (el) => (el.hidden ? "" : el.textContent)).catch(() => "");
+    check((await tokenText(tokPanel)) === "", "usage: a fresh chat shows no counts");
+    const t1 = await panelSend(tokPanel, "The magic word is plum. Acknowledge.", 0);
+    check(t1 > 0, "usage: first turn completed through the composer");
+    await tokPanel.waitForFunction(() => !document.querySelector("#token-line").hidden, null, { timeout: 5000 });
+    const tok1 = await tokenText(tokPanel);
+    check(tok1 === "1,200 in · 45 out", `usage: model line shows one call's counts (got "${tok1}")`);
+    const t2 = await panelSend(tokPanel, "What is the magic word?", t1);
+    const tok2 = await tokenText(tokPanel);
+    check(tok2 === "2,400 in · 90 out", `usage: counts add up across calls in one chat (got "${tok2}")`);
+    const usageHit = await waitHistory((h) => h.index?.items?.[0]?.usage?.input === 2400);
+    const savedUsage = usageHit.index?.items?.[0]?.usage;
+    check(savedUsage && savedUsage.input === 2400 && savedUsage.output === 90,
+      `usage: the saved chat stores the chat total (got ${JSON.stringify(savedUsage)})`);
+    // The history row carries the count, compacted to fit the row.
+    await tokPanel.click("#history-btn");
+    await tokPanel.waitForSelector(".hist-tokens", { timeout: 5000 });
+    const rowTok = await tokPanel.$eval(".hist-item.current .hist-tokens", (el) => el.textContent).catch(() => "");
+    check(rowTok === "2.5k tok", `usage: history row shows the chat's tokens (got "${rowTok}")`);
+    // New chat: the count goes back to nothing.
+    await tokPanel.click("#new-chat");
+    await tokPanel.waitForTimeout(300);
+    check((await tokenText(tokPanel)) === "", "usage: New chat clears the count");
+    // Reopening the saved chat brings its counts back.
+    await tokPanel.click("#history-btn");
+    await tokPanel.waitForSelector(".hist-item .hist-open", { timeout: 5000 });
+    await tokPanel.click(".hist-item .hist-open");
+    await tokPanel.waitForFunction(() => !document.querySelector("#token-line").hidden, null, { timeout: 5000 });
+    const tok3 = await tokenText(tokPanel);
+    check(tok3 === "2,400 in · 90 out", `usage: reopening the saved chat restores its counts (got "${tok3}")`);
+    await tokPanel.close();
 
     // --- First-run / unconfigured (keep these LAST; they wipe the provider) ---
     // (1) An unconfigured run must emit error AND idle so the panel doesn't stick.

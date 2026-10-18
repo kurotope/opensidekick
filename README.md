@@ -101,6 +101,10 @@ genuinely agentic, and usable with any LLM — including fully local models.**
   chat (your messages and the replies), not screenshots or page contents, and a
   chat in which the assistant reads, opens or screenshots a banking, payment or
   crypto site is never saved.
+- **Token counts per chat** — the panel shows the prompt and completion tokens
+  this chat has used, beside the model name, and every saved chat keeps its count
+  in the History list. The numbers come from your provider's response and stay on
+  your device; a server that reports no usage shows nothing.
 - **Scheduled tasks** — run a prompt on a repeating schedule (hourly / daily /
   weekly, or any interval) while Chrome is open; the result arrives as a
   notification. Unattended runs act without asking and decline purchases/deletions.

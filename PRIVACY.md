@@ -16,8 +16,9 @@ backend server operated by the project and collects no analytics or telemetry.
 - **Your messages** to the assistant are sent to that same provider.
 - **Chat history** (on by default; Settings → Chat history) is stored in
   `chrome.storage.local`: your 20 most recent chats, each with a title, when it
-  was started and last used, the model id and provider name that answered, and
-  the text of your messages and the assistant's replies (up to about 200 KB per
+  was started and last used, the model id and provider name that answered, the
+  token counts your provider reported for it, and the text of your messages and
+  the assistant's replies (up to about 200 KB per
   chat; the oldest messages are dropped first, and a single very long message
   is shortened). Your messages are kept as you
   typed them, so a password or key you paste into one is saved with the chat:

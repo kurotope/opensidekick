@@ -23,7 +23,9 @@ const ANTHROPIC_VERSION = "2023-06-01";
 
 /**
  * Call the model once. Streams text via `onDelta` and returns the completed
- * normalized assistant turn: { content, toolCalls, stopReason, reasoning }.
+ * normalized assistant turn: { content, toolCalls, stopReason, reasoning, usage }.
+ * `usage` is { input, output } token counts, or null when the server reported
+ * none — it is read from the stream, never sent anywhere, and stays on the device.
  * `reasoning` is whatever a thinking model sent in a separate reasoning field
  * ("" when none). It never reaches `onDelta`, and nothing outside testModel()
  * reads it: it is not shown, saved or sent back to the model.
@@ -282,6 +284,9 @@ async function callOpenAI(provider, opts) {
     messages: toOpenAIMessages(opts.messages, opts.system),
     stream: true,
     max_tokens: opts.maxTokens,
+    // Without this the stream carries no token counts: OpenAI-compatible servers
+    // only append the usage chunk when the client asks for it.
+    stream_options: { include_usage: true },
   };
   if (typeof opts.temperature === "number") body.temperature = opts.temperature;
   const tools = toOpenAITools(opts.tools);
@@ -293,13 +298,26 @@ async function callOpenAI(provider, opts) {
     body.venice_parameters = { include_venice_system_prompt: false, strip_thinking_response: true };
   }
 
-  const res = await fetch(`${trimSlash(provider.baseUrl)}/chat/completions`, {
-    method: "POST",
-    headers: openaiHeaders(provider),
-    body: JSON.stringify(body),
-    signal: opts.signal,
-  });
-  if (!res.ok) throw await httpError(res);
+  const send = () =>
+    fetch(`${trimSlash(provider.baseUrl)}/chat/completions`, {
+      method: "POST",
+      headers: openaiHeaders(provider),
+      body: JSON.stringify(body),
+      signal: opts.signal,
+    });
+  let res;
+  for (let attempt = 0; ; attempt++) {
+    res = await send();
+    if (res.ok) break;
+    const err = await httpError(res);
+    // A server that rejects the stream_options field loses token counts, not the
+    // task: drop the field and send the request once more.
+    if (attempt === 0 && body.stream_options && /stream_options/i.test(err.message)) {
+      delete body.stream_options;
+      continue;
+    }
+    throw err;
+  }
 
   let content = "";
   // Thinking models stream their thoughts in a separate field: "reasoning" on
@@ -308,6 +326,7 @@ async function callOpenAI(provider, opts) {
   let reasoning = "";
   const toolAccum = new Map(); // index -> { id, name, argChunks: [] }
   let stopReason = null;
+  let usage = null;
 
   for await (const evt of sseStream(res)) {
     if (evt === "[DONE]") break;
@@ -317,6 +336,9 @@ async function callOpenAI(provider, opts) {
     } catch {
       continue;
     }
+    // The usage chunk carries no choices, so it has to be read before the
+    // choices guard below — that guard is why token counts were invisible here.
+    if (json.usage) usage = normalizeUsage(json.usage);
     const choice = json.choices && json.choices[0];
     if (!choice) continue;
     const delta = choice.delta || {};
@@ -350,6 +372,7 @@ async function callOpenAI(provider, opts) {
     toolCalls,
     stopReason: toolCalls.length ? "tool_use" : stopReason || "stop",
     reasoning,
+    usage,
   };
 }
 
@@ -443,6 +466,7 @@ async function callAnthropic(provider, opts) {
   let content = "";
   const blocks = new Map(); // index -> { type, name, id, jsonChunks: [] }
   let stopReason = null;
+  let usage = null;
 
   for await (const evt of sseStream(res)) {
     let json;
@@ -452,6 +476,10 @@ async function callAnthropic(provider, opts) {
       continue;
     }
     switch (json.type) {
+      case "message_start": {
+        usage = normalizeUsage(json.message && json.message.usage);
+        break;
+      }
       case "content_block_start": {
         const cb = json.content_block || {};
         blocks.set(json.index, {
@@ -475,6 +503,9 @@ async function callAnthropic(provider, opts) {
       }
       case "message_delta": {
         if (json.delta?.stop_reason) stopReason = json.delta.stop_reason;
+        // Output tokens arrive here, counted cumulatively, so the running total
+        // is the largest value seen rather than a sum.
+        if (json.usage) usage = mergeUsage(usage, normalizeUsage(json.usage));
         break;
       }
       case "error": {
@@ -495,6 +526,7 @@ async function callAnthropic(provider, opts) {
     toolCalls,
     stopReason: toolCalls.length ? "tool_use" : stopReason || "end_turn",
     reasoning: "",
+    usage,
   };
 }
 
@@ -525,6 +557,35 @@ async function* sseStream(res) {
       }
     }
   }
+}
+
+/**
+ * Token counts in one shape: { input, output }. Servers say it three ways —
+ * prompt_tokens / completion_tokens (OpenAI-style), prompt_eval_count /
+ * eval_count (Ollama's OpenAI-compatible endpoint), input_tokens /
+ * output_tokens (Anthropic). Cache tokens count into input: the number should
+ * be what the model processed, not just the uncached prefix. Null when nothing
+ * usable is reported, so the UI can say "no counts from this server" instead of
+ * showing zeros.
+ */
+function normalizeUsage(raw) {
+  if (!raw || typeof raw !== "object") return null;
+  const n = (v) => (Number.isFinite(v) && v >= 0 ? v : 0);
+  const input =
+    n(raw.prompt_tokens) ||
+    n(raw.prompt_eval_count) ||
+    (n(raw.input_tokens) + n(raw.cache_read_input_tokens) + n(raw.cache_creation_input_tokens));
+  const output = n(raw.completion_tokens) || n(raw.eval_count) || n(raw.output_tokens);
+  if (!input && !output) return null;
+  return { input, output };
+}
+
+// Anthropic reports input in message_start and output cumulatively in
+// message_delta, so the running total is the larger of each field, not a sum.
+function mergeUsage(a, b) {
+  if (!a) return b;
+  if (!b) return a;
+  return { input: Math.max(a.input, b.input), output: Math.max(a.output, b.output) };
 }
 
 function safeParseArgs(str) {

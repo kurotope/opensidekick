@@ -43,6 +43,7 @@ const els = {
   jumpLatest: document.getElementById("jump-latest"),
   modelLine: document.getElementById("model-line"),
   modelChip: document.getElementById("model-chip"),
+  tokenLine: document.getElementById("token-line"),
 };
 
 let savedPrompts = [];
@@ -66,6 +67,10 @@ let newChatPending = false;
 let current = null; // { el, raw } assistant bubble being streamed
 let pendingTools = []; // log rows awaiting their matching tool_end
 let logGroup = null; // the open <details> run of consecutive tool rows
+// Token counts for the chat on screen. The worker keeps the running total (it
+// sums every provider call) and sends it with the chat state; the panel adds
+// each usage event as it arrives, so the number updates during a run.
+let chatUsage = null;
 
 init();
 
@@ -166,6 +171,8 @@ function applyState(state) {
     autoGrow();
   }
   if (state.running) setRunning(true);
+  chatUsage = state.usage || null;
+  renderTokenLine();
   // A recording kept running in the worker while the panel was closed — pick
   // the banner (and step count) back up so Stop still works.
   if (state.recording) {
@@ -232,6 +239,21 @@ function renderModelChip(model, providerName) {
   els.modelChip.querySelector(".mc-model").textContent = model;
   els.modelChip.querySelector(".mc-provider").textContent = providerName || "";
   els.modelChip.title = `${model} · ${providerName || ""} (open Settings to change)`;
+}
+
+// 12.4k rather than 12,403: the row is one line in a 360px panel.
+function compactTokens(n) {
+  return n >= 1000 ? (n / 1000).toFixed(n >= 10000 ? 0 : 1) + "k" : String(n);
+}
+
+function renderTokenLine() {
+  if (!chatUsage || !(chatUsage.input + chatUsage.output)) {
+    els.tokenLine.hidden = true;
+    return;
+  }
+  els.tokenLine.hidden = false;
+  els.tokenLine.textContent = `${chatUsage.input.toLocaleString()} in · ${chatUsage.output.toLocaleString()} out`;
+  els.tokenLine.title = "Tokens this chat: prompt and completion, summed over every model call.";
 }
 
 // -------------------------------------------------------------------------
@@ -457,6 +479,8 @@ function newChat() {
   clearTranscript();
   els.empty.hidden = false;
   newChatPending = true;
+  chatUsage = null; // a new chat has spent nothing
+  renderTokenLine();
 }
 
 function clearTranscript() {
@@ -474,6 +498,8 @@ function resetChatView() {
   clearTranscript();
   els.empty.hidden = false;
   newChatPending = false;
+  chatUsage = null; // a new chat has spent nothing
+  renderTokenLine();
 }
 
 // -------------------------------------------------------------------------
@@ -499,6 +525,13 @@ function handleEvent(ev) {
       break;
     case "assistant_end":
       endAssistant(ev.content);
+      break;
+    case "usage":
+      chatUsage = {
+        input: (chatUsage ? chatUsage.input : 0) + ev.input,
+        output: (chatUsage ? chatUsage.output : 0) + ev.output,
+      };
+      renderTokenLine();
       break;
     case "tool_start":
       addToolStart(ev.name, ev.args);
@@ -1319,13 +1352,20 @@ function renderHistoryMenu(res) {
       const cur = it.id === res.currentId;
       const title = escapeHtml(it.title);
       const who = it.model ? (it.provider ? `${it.model} via ${it.provider}` : it.model) : "";
-      const tip = escapeHtml(`${it.title}\n${new Date(it.updatedAt).toLocaleString()}${who ? ` · ${who}` : ""}`).replace(/\n/g, "&#10;");
+      const tok = it.usage
+        ? `<span aria-hidden="true">·</span><span class="hist-tokens">${compactTokens(it.usage.input + it.usage.output)} tok</span>`
+        : "";
+      const tip = escapeHtml(
+        `${it.title}\n${new Date(it.updatedAt).toLocaleString()}${who ? ` · ${who}` : ""}${
+          it.usage ? ` · ${it.usage.input.toLocaleString()} in / ${it.usage.output.toLocaleString()} out` : ""
+        }`,
+      ).replace(/\n/g, "&#10;");
       const model = it.model ? `<span aria-hidden="true">·</span><span class="hist-model">${escapeHtml(it.model)}</span>` : "";
       return (
         `<li class="hist-item${cur ? " current" : ""}" data-id="${escapeHtml(it.id)}">` +
         `<button type="button" class="hist-open"${cur ? ' aria-current="true"' : ""} title="${tip}"${dis}>` +
         `<span class="hist-title">${title}</span>` +
-        `<span class="hist-meta"><span class="hist-time">${escapeHtml(relativeTime(it.updatedAt))}</span>${model}</span></button>` +
+        `<span class="hist-meta"><span class="hist-time">${escapeHtml(relativeTime(it.updatedAt))}</span>${model}${tok}</span></button>` +
         `<button type="button" class="icon-btn hist-rename" title="Rename" aria-label="Rename chat “${title}”">${ic("pencil")}</button>` +
         `<button type="button" class="icon-btn hist-delete" title="Delete" aria-label="Delete chat “${title}”"${dis}>${ic("trash")}</button>` +
         `</li>`
@@ -1377,6 +1417,8 @@ async function openSession(id) {
   clearTranscript();
   newChatPending = false; // otherwise the next send would discard the chat just opened
   const history = res.history || [];
+  chatUsage = res.usage || null;
+  renderTokenLine();
   if (res.trimmed) addNote(TRIMMED_NOTE, "dot");
   renderHistory(history);
   els.empty.hidden = history.length > 0;
