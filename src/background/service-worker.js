@@ -37,6 +37,7 @@ import {
   emptyIndex,
 } from "./sessions.js";
 import { validateImages, ATTACH_NOTES } from "../common/attachments.js";
+import { cleanUsage } from "../common/usage.js";
 import { resolveSource, isNoteworthyChange, featureEnabled, thresholdFor } from "./decisions.js";
 import { runAgent } from "./agent.js";
 import { detachAll } from "./cdp.js";
@@ -105,6 +106,7 @@ function loadLive() {
             ? {
                 id: meta.id,
                 sensitive: !!meta.sensitive,
+                usage: cleanUsage(meta.usage),
                 ...(meta.trimmed ? { trimmed: true } : {}),
                 ...(meta.compacted ? { compacted: true } : {}),
               }
@@ -122,7 +124,9 @@ function loadLive() {
       const body = await loadSessionBody(index.currentId);
       if (body && body.messages.length) {
         conversation = body.messages;
-        session = { id: body.id, sensitive: false, ...(body.trimmed ? { trimmed: true } : {}) };
+        // The token counts live on the index entry, not in the chat body.
+        const entry = index.items.find((i) => i.id === index.currentId);
+        session = { id: body.id, sensitive: false, usage: cleanUsage(entry && entry.usage), ...(body.trimmed ? { trimmed: true } : {}) };
       }
     } catch {
       /* continue with an empty chat */
@@ -137,6 +141,7 @@ async function writeHot() {
   const meta = {
     id: session.id,
     sensitive: session.sensitive,
+    usage: session.usage,
     ...(session.trimmed ? { trimmed: true } : {}),
     ...(session.compacted ? { compacted: true } : {}),
   };
@@ -206,6 +211,7 @@ async function saveCold(s, convo, meta) {
     now: Date.now(),
     model: meta.model,
     provider: meta.provider,
+    usage: meta.usage,
     trimmed: !!s.trimmed,
   });
   if (!plan.index) return { enabled: true, wrote: false };
@@ -493,6 +499,7 @@ async function handleGetState() {
     sensitive: !!(session && session.sensitive) && config.settings.keepHistory !== false,
     trimmed: !!(session && session.trimmed),
     compacted: !!(session && session.compacted),
+    usage: session ? cleanUsage(session.usage) : null,
   };
 }
 
@@ -522,7 +529,7 @@ async function openSession(id) {
   // chat that is no longer on screen.
   if (chatRunning()) return { ok: false, error: "busy" };
   if (session && session.id === id) {
-    return { ok: true, id, history: conversationHistory(), trimmed: !!session.trimmed };
+    return { ok: true, id, history: conversationHistory(), trimmed: !!session.trimmed, usage: cleanUsage(session.usage) };
   }
   const config = await loadConfig();
   if (config.settings.keepHistory === false) return { ok: false, error: "disabled" };
@@ -536,17 +543,18 @@ async function openSession(id) {
     return { ok: false, error: "not-found" };
   }
   if (chatRunning()) return { ok: false, error: "busy" }; // a run may have started while we read
-  conversation = body.messages;
-  session = { id, sensitive: false, ...(body.trimmed ? { trimmed: true } : {}) };
-  await writeHot();
   // Opening doesn't touch updatedAt, so a glance at an old chat doesn't reorder the list.
-  await withHistory(async () => {
+  // The same read gives the token counts, which sit on the index entry.
+  const entryUsage = await withHistory(async () => {
     const index = await loadSessionIndex();
-    if (index.currentId !== id && index.items.some((i) => i.id === id)) {
-      await writeSessionIndex({ ...index, currentId: id });
-    }
-  }).catch(() => {});
-  return { ok: true, id, history: conversationHistory(), trimmed: !!body.trimmed };
+    const entry = index.items.find((i) => i.id === id);
+    if (index.currentId !== id && entry) await writeSessionIndex({ ...index, currentId: id });
+    return cleanUsage(entry && entry.usage);
+  }).catch(() => null);
+  conversation = body.messages;
+  session = { id, sensitive: false, usage: entryUsage, ...(body.trimmed ? { trimmed: true } : {}) };
+  await writeHot();
+  return { ok: true, id, history: conversationHistory(), trimmed: !!body.trimmed, usage: entryUsage };
 }
 
 async function renameSession(id, title) {
@@ -622,7 +630,21 @@ async function handleRunTask(msg) {
   // Captured now: New chat mid-run must not redirect this run's save.
   const runSession = session;
   const runConversation = conversation;
-  const saveMeta = { model: config.activeModel, provider: provider.name };
+  runSession.usage = cleanUsage(runSession.usage) || { input: 0, output: 0, cached: 0, write: 0 };
+  const saveMeta = { model: config.activeModel, provider: provider.name, usage: runSession.usage };
+  // Each provider call reports its own token counts, so they add to the chat's
+  // running total as they arrive: the number on screen and in the saved chat is
+  // the whole chat, not the last turn. cleanUsage drops a zero cache field, so
+  // the running total has to carry its own.
+  const runEmit = (ev) => {
+    if (ev.kind === "usage") {
+      runSession.usage.input += ev.input;
+      runSession.usage.output += ev.output;
+      runSession.usage.cached = (runSession.usage.cached || 0) + (ev.cached || 0);
+      runSession.usage.write = (runSession.usage.write || 0) + (ev.write || 0);
+    }
+    emit(ev);
+  };
 
   const controller = new AbortController();
   currentRun = { controller, chat: true };
@@ -645,7 +667,7 @@ async function handleRunTask(msg) {
     provider,
     initialTabId,
     signal: controller.signal,
-    emit,
+    emit: runEmit,
     requestPermission,
     requestPlanApproval,
     saveSitePermission: (origin, value) => setSitePermission(origin, value),

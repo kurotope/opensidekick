@@ -5,6 +5,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added
+
+- **Token counts for each chat.** The panel shows the total tokens this chat has
+  used, beside the model name; clicking the number breaks it into input, output,
+  and the share the provider read from its own cache, and every saved chat keeps
+  its count in the History list. The numbers are read from the provider's own
+  response (`usage` in the stream), summed over every model call in the chat, and
+  stay on the device: no new permission, no new network destination. Cache reads
+  count as part of input, cache writes get their own row and are never counted as
+  hits, and a server that reports no cache data says nothing about cache. The hit
+  share is never rounded up to 100%: a 99.96% hit prints the decimals that keep
+  it honest, because a meter claiming a perfect hit you paid for is the same lie
+  as a cache hit of 0%. Cache reads are read under the four names providers use
+  (OpenAI/OpenRouter's nested `cached_tokens`, DeepSeek/Groq's
+  `prompt_cache_hit_tokens`, Kimi's top-level `cached_tokens`, Anthropic's
+  `cache_read_input_tokens`). A server that rejects the request field asking for
+  usage is asked again without it, so the task still runs.
+
 ### Fixed
 
 - **`click_element` fired twice.** The content script dispatched a synthetic

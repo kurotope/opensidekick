@@ -135,6 +135,70 @@ body {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+/* Token counts for the chat, beside the chip. Mono so the digits line up with
+   the model id, muted so it reads as a count. A button, not a span: the
+   breakdown opens on a click, so it has to be focusable and announce its state.
+   The border is the same as the model chip's: a pill with a border reads as a
+   control at rest, which a bare number beside a bordered chip does not. */
+.token-line {
+  align-self: center;
+  flex: 0 1 auto;
+  min-width: 0;
+  height: 24px;
+  padding: 0 8px;
+  border: 1px solid var(--os-line);
+  border-radius: var(--os-r-pill);
+  background: transparent;
+  color: var(--os-muted);
+  font: inherit;
+  font-family: var(--os-mono);
+  font-size: var(--os-fs-12);
+  line-height: var(--os-lh-12);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease;
+}
+.token-line:hover {
+  background: var(--os-hover);
+  color: var(--os-ink-soft);
+  border-color: var(--os-line-2);
+}
+.token-line[aria-expanded="true"] {
+  color: var(--os-ink);
+  border-color: var(--os-line-2);
+}
+
+/* The breakdown behind the token line. Shares .wf-menu's card look. Its top and
+   left come from the pill's rect when it opens: the pill sits at the right end
+   of the header, so a fixed anchor put the card ~300px from what you clicked.
+   These values are the fallback for a pill near the left edge. */
+.token-card {
+  top: 56px;
+  left: 8px;
+  right: auto;
+  min-width: 200px;
+  max-width: 260px;
+  padding: 6px 10px;
+}
+.token-card .tk-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 2px 0;
+  font-size: var(--os-fs-12);
+  line-height: var(--os-lh-12);
+}
+.token-card .tk-label {
+  color: var(--os-muted);
+}
+.token-card .tk-val {
+  font-family: var(--os-mono);
+  color: var(--os-ink-soft);
+  font-variant-numeric: tabular-nums;
+}
 
 /* Banners -------------------------------------------------------------- */
 
@@ -315,6 +379,11 @@ body {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
+  font-family: var(--os-mono);
+}
+/* Token count per saved chat: never truncated, it is the shortest item in the row. */
+.hist-tokens {
+  flex: 0 0 auto;
   font-family: var(--os-mono);
 }
 .hist-item .icon-btn {

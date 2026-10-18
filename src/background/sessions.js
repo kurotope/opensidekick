@@ -4,6 +4,7 @@
 // the service worker do the reading and writing.
 
 import { isSensitive } from "./permissions.js";
+import { cleanUsage } from "../common/usage.js";
 import { SESSIONS_MAX } from "../common/constants.js";
 
 export const MESSAGE_MAX_CHARS = 20000;
@@ -139,6 +140,7 @@ export function readIndex(raw) {
       updatedAt: i.updatedAt,
       model: str(i.model),
       provider: str(i.provider),
+      usage: cleanUsage(i.usage),
     }))
     .sort((a, b) => b.updatedAt - a.updatedAt);
   const seen = new Set();
@@ -149,8 +151,9 @@ export function readIndex(raw) {
 
 export function upsertSession(index, entry, { max = SESSIONS_MAX } = {}) {
   const existing = index.items.find((i) => i.id === entry.id);
+  const usage = cleanUsage(entry.usage);
   const item = existing
-    ? { ...existing, updatedAt: entry.updatedAt, model: entry.model, provider: entry.provider }
+    ? { ...existing, updatedAt: entry.updatedAt, model: entry.model, provider: entry.provider, usage }
     : {
         id: entry.id,
         title: entry.title,
@@ -158,6 +161,7 @@ export function upsertSession(index, entry, { max = SESSIONS_MAX } = {}) {
         updatedAt: entry.updatedAt,
         model: entry.model,
         provider: entry.provider,
+        usage,
       };
   const rest = index.items.filter((i) => i.id !== entry.id).sort((a, b) => b.updatedAt - a.updatedAt);
   const keep = Math.max(0, max - 1);
@@ -191,7 +195,7 @@ export function reconcileIndex(index, bodyIds) {
 // Everything the end-of-run save writes, decided in one place. `trimmed` is
 // whether an earlier save already dropped old exchanges (a chat restored from
 // a trimmed body has lost them for good, even if it now fits).
-export function planSave({ index, sessionId, sensitive, conversation, isCurrent, keepHistory, now, model, provider, trimmed = false }) {
+export function planSave({ index, sessionId, sensitive, conversation, isCurrent, keepHistory, now, model, provider, usage, trimmed = false }) {
   const nothing = { index: null, body: null, removeIds: [] };
   if (!keepHistory) return nothing;
   const listed = index.items.some((i) => i.id === sessionId);
@@ -207,6 +211,9 @@ export function planSave({ index, sessionId, sensitive, conversation, isCurrent,
     updatedAt: now,
     model: str(model),
     provider: str(provider),
+    // The chat's running total, not this run's delta: the worker keeps the
+    // total on the live chat and adds each provider call's counts to it.
+    usage,
   });
   let currentId = isCurrent ? sessionId : up.index.currentId;
   if (!up.index.items.some((i) => i.id === currentId)) currentId = null;
