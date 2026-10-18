@@ -62,7 +62,7 @@ function identityNotes(config, provider) {
 }
 
 export async function runAgent(deps) {
-  const { conversation, config, provider, initialTabId, signal, emit, requestPermission, requestPlanApproval, saveSitePermission } = deps;
+  const { conversation, config, provider, initialTabId, signal, emit, requestPermission, requestPlanApproval, saveSitePermission, cacheKey } = deps;
   const identity = identityNotes(config, provider);
 
   const maxSteps = Math.max(1, config.settings.maxSteps || 25);
@@ -144,7 +144,7 @@ export async function runAgent(deps) {
     emit({ kind: "planning" });
     let plan = null;
     try {
-      plan = await makePlan(provider, config, conversation, signal, identity.plan);
+      plan = await makePlan(provider, config, conversation, signal, identity.plan, cacheKey);
     } catch {
       plan = null; // if planning fails, fall through and run normally
     }
@@ -192,6 +192,7 @@ export async function runAgent(deps) {
         tools,
         maxTokens: config.settings.maxTokens,
         temperature: config.settings.temperature,
+        cacheKey,
         signal,
         onDelta: (t) => emit({ kind: "assistant_delta", text: t }),
       });
@@ -554,7 +555,7 @@ const PLAN_SYSTEM = `The user has asked you to do something in their browser. Be
 {"summary": "one sentence describing what you'll do", "steps": ["3 to 7 short high-level steps"], "domains": ["website hostnames you expect to use, e.g. example.com"], "needs_actions": true or false}
 Set needs_actions to false only if you can answer the user directly without acting on any page.`;
 
-async function makePlan(provider, config, conversation, signal, identity = "") {
+async function makePlan(provider, config, conversation, signal, identity = "", cacheKey) {
   const res = await callModel(provider, {
     model: config.activeModel,
     system: identity + PLAN_SYSTEM,
@@ -562,6 +563,7 @@ async function makePlan(provider, config, conversation, signal, identity = "") {
     tools: [],
     maxTokens: 700,
     temperature: config.settings.temperature,
+    cacheKey,
     signal,
   });
   return parsePlan(res.content);

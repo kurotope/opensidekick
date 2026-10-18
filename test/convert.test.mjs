@@ -56,15 +56,16 @@ await callModel(
   { model: "claude", system: "SYS", maxTokens: 200, messages: conversation, tools: [{ name: "read_page", description: "d", parameters: { type: "object", properties: {} } }] },
 );
 const a = captured.messages;
-eq(captured.system, "SYS", "anthropic: system as top-level param");
+eq(captured.system, [{ type: "text", text: "SYS", cache_control: { type: "ephemeral" } }], "anthropic: system as top-level blocks, with the cache breakpoint on the last");
 eq(a[0], { role: "user", content: [{ type: "text", text: "search for cats" }] }, "anthropic: first user block");
 eq(a[1].role, "assistant", "anthropic: assistant role");
 eq(a[1].content[0], { type: "tool_use", id: "c1", name: "read_page", input: {} }, "anthropic: assistant tool_use (no empty text block)");
 eq(a[2], { role: "user", content: [{ type: "tool_result", tool_use_id: "c1", content: '{"ok":true,"elements":[]}' }] }, "anthropic: tool_result as user turn");
 eq(a[3].content[0], { type: "text", text: "Found the search box." }, "anthropic: assistant text block first");
 eq(a[3].content[1], { type: "tool_use", id: "c2", name: "type_text", input: { ref: 3, text: "cats", submit: true } }, "anthropic: assistant text+tool_use");
-// The final tool_result and the trailing "thanks" user message must merge into ONE user turn (alternation).
-eq(a[4], { role: "user", content: [{ type: "tool_result", tool_use_id: "c2", content: '{"ok":true}' }, { type: "text", text: "thanks" }] }, "anthropic: trailing tool_result + user text MERGED into one turn");
+// The final tool_result and the trailing "thanks" user message must merge into ONE user turn (alternation),
+// and the breakpoint sits on the last block of that turn.
+eq(a[4], { role: "user", content: [{ type: "tool_result", tool_use_id: "c2", content: '{"ok":true}' }, { type: "text", text: "thanks", cache_control: { type: "ephemeral" } }] }, "anthropic: trailing tool_result + user text MERGED into one turn, breakpoint on its last block");
 eq(a.length, 5, "anthropic: exactly 5 turns (proper alternation)");
 eq(captured.tools[0].input_schema, { type: "object", properties: {} }, "anthropic: tool uses input_schema");
 
@@ -91,7 +92,7 @@ const ai = captured.messages;
 // The two user messages merge into one Anthropic user turn.
 eq(ai.length, 1, "anthropic image: user turns merged");
 eq(ai[0].content[1], { type: "text", text: "Here is the screenshot:" }, "anthropic image: text block");
-eq(ai[0].content[2], { type: "image", source: { type: "base64", media_type: "image/png", data: "AAAB" } }, "anthropic image: base64 image block");
+eq(ai[0].content[2], { type: "image", source: { type: "base64", media_type: "image/png", data: "AAAB" }, cache_control: { type: "ephemeral" } }, "anthropic image: base64 image block, as the last block of the turn, carries the breakpoint");
 
 console.log(fail ? "\nSOME TESTS FAILED" : "\nALL CONVERSION TESTS PASSED");
 process.exitCode = fail;

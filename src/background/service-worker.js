@@ -624,6 +624,8 @@ async function handleRunTask(msg) {
     emit,
     requestPermission,
     requestPlanApproval,
+    // OpenAI routes a chat's requests to one cache prefix by key.
+    cacheKey: runSession.id,
     saveSitePermission: (origin, value) => setSitePermission(origin, value),
   })
     .catch((e) => emit({ kind: "error", error: String(e.message || e) }))

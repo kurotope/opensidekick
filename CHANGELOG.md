@@ -5,6 +5,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added
+
+- **Anthropic prompt caching, and OpenAI's cache routing key.** Anthropic reads
+  from the prompt cache only where the request marks a breakpoint, and
+  OpenSidekick marked none, so an Anthropic user's cache reads always read 0.
+  Requests now mark the tools, the system prompt, and the conversation prefix as
+  cacheable — the placement Claude Code uses. OpenAI requests carry the chat's
+  random id as `prompt_cache_key` so the chat's requests land on one cache; the
+  key goes to api.openai.com and to no other provider. A breakpoint below the
+  model's minimum cacheable size creates no cache entry, so a short chat pays
+  nothing for asking; a long one pays the write rate once and then reads at a
+  fraction of the input rate.
+
 ### Fixed
 
 - **`click_element` fired twice.** The content script dispatched a synthetic

@@ -14,6 +14,12 @@ backend server operated by the project and collects no analytics or telemetry.
   the assistant to work on is read on demand and sent **to the LLM provider you
   configured** so the model can understand and act on the page.
 - **Your messages** to the assistant are sent to that same provider.
+- **Prompt caching.** Anthropic requests mark the conversation prefix as
+  cacheable (`cache_control`), so Anthropic stores that prefix on its servers for
+  a few hours and bills the first write above the input rate. OpenAI requests
+  carry the chat's random id as `prompt_cache_key` so OpenAI routes the chat's
+  requests to one cache; the id is a random UUID, not your name, and is sent to
+  no other provider. Both are the provider's own cache, not a new destination.
 - **Chat history** (on by default; Settings → Chat history) is stored in
   `chrome.storage.local`: your 20 most recent chats, each with a title, when it
   was started and last used, the model id and provider name that answered, and

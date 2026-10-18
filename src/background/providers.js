@@ -284,6 +284,11 @@ async function callOpenAI(provider, opts) {
     max_tokens: opts.maxTokens,
   };
   if (typeof opts.temperature === "number") body.temperature = opts.temperature;
+  // OpenAI routes requests that share a prompt_cache_key to the same cache
+  // prefix, so the chat's id is the key. Sent only to api.openai.com: other
+  // OpenAI-compatible servers get a field they do not document, and OpenRouter
+  // caches per provider, not per key. Clamped to the length OpenAI accepts.
+  if (opts.cacheKey && provider.baseUrl.includes("api.openai.com")) body.prompt_cache_key = String(opts.cacheKey).slice(0, 20);
   const tools = toOpenAITools(opts.tools);
   if (tools) body.tools = tools;
   if (isVeniceUrl(provider.baseUrl)) {
@@ -418,6 +423,30 @@ function toAnthropicTools(tools) {
   }));
 }
 
+// Anthropic reads from the prompt cache only where the request marks a
+// breakpoint, so a request that marks nothing reports zero cache reads and the
+// token meter has nothing to show. Three breakpoints, the placement Claude Code
+// uses: the tools, the system prompt, and the conversation prefix. A breakpoint
+// below the model's minimum cacheable size creates no cache entry, so a short
+// chat pays nothing for asking; a long one pays the write rate once and then
+// reads at a fraction of the input rate.
+const EPHEMERAL = { type: "ephemeral" };
+
+function addAnthropicCacheBreakpoints(body) {
+  if (body.system && body.system.length) body.system[body.system.length - 1].cache_control = EPHEMERAL;
+  if (body.tools && body.tools.length) body.tools[body.tools.length - 1].cache_control = EPHEMERAL;
+  // The last user turn, not the last message: in the agent loop that is the
+  // tool_result the model has to answer, and cache_control on an assistant
+  // tool_use block is not a cacheable block type.
+  for (let i = body.messages.length - 1; i >= 0; i--) {
+    const m = body.messages[i];
+    if (m.role !== "user") continue;
+    const last = m.content[m.content.length - 1];
+    if (last && (last.type === "text" || last.type === "tool_result" || last.type === "image")) last.cache_control = EPHEMERAL;
+    break;
+  }
+}
+
 async function callAnthropic(provider, opts) {
   const systemParts = opts.messages.filter((m) => m.role === "system").map((m) => m.content);
   if (opts.system) systemParts.unshift(opts.system);
@@ -428,9 +457,11 @@ async function callAnthropic(provider, opts) {
     stream: true,
     messages: toAnthropicMessages(opts.messages),
   };
-  if (systemParts.length) body.system = systemParts.join("\n\n");
+  // Blocks, not a joined string: a breakpoint has to sit on a block.
+  if (systemParts.length) body.system = [{ type: "text", text: systemParts.join("\n\n") }];
   const tools = toAnthropicTools(opts.tools);
   if (tools) body.tools = tools;
+  addAnthropicCacheBreakpoints(body);
 
   const res = await fetch(`${trimSlash(provider.baseUrl)}/messages`, {
     method: "POST",

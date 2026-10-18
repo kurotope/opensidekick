@@ -100,6 +100,52 @@ assert(JSON.stringify(r2.toolCalls[0]?.args) === '{"ref":5}', `anthropic tool ar
 assert(r2.stopReason === "tool_use", `anthropic stopReason tool_use (got ${r2.stopReason})`);
 assert(r2.reasoning === "", `anthropic reasoning is "" for shape parity (got ${JSON.stringify(r2.reasoning)})`);
 
+// ---- Anthropic: cache breakpoints, the only way the provider reports cache reads ----
+let anthBody = null;
+globalThis.fetch = async (url, init) => {
+  anthBody = JSON.parse(init.body);
+  return fakeResponse(anthChunks);
+};
+await callModel(
+  { type: "anthropic", baseUrl: "https://api.anthropic.com/v1", apiKey: "k" },
+  {
+    model: "claude",
+    system: "You are a browser assistant.",
+    messages: [
+      { role: "user", content: "hi" },
+      { role: "assistant", content: "ok", toolCalls: [{ id: "tu_1", name: "read_page", args: {} }] },
+      { role: "tool", toolCallId: "tu_1", content: "page text" },
+    ],
+    tools: [{ name: "read_page", description: "d", parameters: {} }],
+    maxTokens: 100,
+  },
+);
+assert(Array.isArray(anthBody.system) && anthBody.system[0].cache_control?.type === "ephemeral",
+  `anthropic: the system block carries the cache breakpoint (got ${JSON.stringify(anthBody.system)})`);
+assert(anthBody.tools[0].cache_control?.type === "ephemeral", "anthropic: the last tool carries the cache breakpoint");
+const lastUser = anthBody.messages[anthBody.messages.length - 1];
+assert(lastUser.role === "user" && lastUser.content[lastUser.content.length - 1].cache_control?.type === "ephemeral",
+  `anthropic: the last user turn carries the cache breakpoint (got ${JSON.stringify(lastUser.content)})`);
+
+// ---- OpenAI: the chat's cache key goes to api.openai.com, not to a local server ----
+let oaBody = null;
+globalThis.fetch = async (url, init) => {
+  oaBody = JSON.parse(init.body);
+  return fakeResponse(twoChunks);
+};
+await callModel(
+  { type: "openai", baseUrl: "https://api.openai.com/v1", apiKey: "k" },
+  { model: "m", messages: [{ role: "user", content: "hi" }], cacheKey: "b7f9c2a1-4432-8899-aabb-ccddeeff0011" },
+);
+assert(oaBody.prompt_cache_key === "b7f9c2a1-4432-8899-a",
+  `openai: prompt_cache_key sent to api.openai.com, clamped to 20 (got ${JSON.stringify(oaBody.prompt_cache_key)})`);
+await callModel(
+  { type: "openai", baseUrl: "http://localhost:11434/v1", apiKey: "" },
+  { model: "m", messages: [{ role: "user", content: "hi" }], cacheKey: "abc" },
+);
+assert(oaBody.prompt_cache_key === undefined,
+  `openai: no cache key sent to a server that does not document the field (got ${JSON.stringify(oaBody.prompt_cache_key)})`);
+
 // ---- listModels: a failed request carries the HTTP status ----
 for (const type of ["openai", "anthropic"]) {
   globalThis.fetch = async () => new Response("", { status: 403 });
