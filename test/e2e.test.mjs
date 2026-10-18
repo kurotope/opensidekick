@@ -34,6 +34,8 @@ const IMG_PNG = fs.readFileSync(path.join(EXT_DIR, "icons/icon16.png")); // a re
 let failures = 0;
 let sawImage = false; // set by the mock when a request carries an image part
 let lastImageUrl = ""; // the most recent image data URI the mock received
+let imageRequests = 0; // how many requests carried an image, for the composer scenario
+let lastImageDims = { w: 0, h: 0 }; // PNG dimensions the mock decoded from the IHDR chunk
 let probeRequests = []; // { model, kind } per testModel probe the mock answered
 let probeDelayMs = 0; // holds the tools probe open, so a run can be observed/cancelled
 let lastSystem = ""; // the system prompt of the most recent agent (non-probe) request
@@ -90,7 +92,13 @@ let BASE2 = ""; // second server (different origin), set in main()
 
 // --- Mock model: scripts multi-step agentic tasks over the tool protocol. ---
 function decide(messages) {
-  const firstUser = (messages.find((m) => m.role === "user")?.content || "").toString().toLowerCase();
+  // A user turn that carries an attachment arrives as an array of content parts,
+  // so the text has to be read out of them before any scenario can key on it.
+  const textOf = (m) =>
+    Array.isArray(m.content)
+      ? m.content.filter((p) => p && p.type === "text").map((p) => p.text).join(" ")
+      : String(m.content || "");
+  const firstUser = textOf(messages.find((m) => m.role === "user") || { content: "" }).toLowerCase();
   const toolMsgs = messages.filter((m) => m.role === "tool");
   const n = toolMsgs.length;
   const parsed = toolMsgs.map((m) => { try { return JSON.parse(m.content); } catch { return {}; } });
@@ -99,7 +107,8 @@ function decide(messages) {
 
   // Model identity: the agent appends which model it is to the system prompt.
   // Keyed on the LATEST user turn, since this is asked mid-conversation.
-  const lastUser = ([...messages].reverse().find((m) => m.role === "user" && typeof m.content === "string")?.content || "").toLowerCase();
+  const lastUserMsg = [...messages].reverse().find((m) => m.role === "user");
+  const lastUser = textOf(lastUserMsg || { content: "" }).toLowerCase();
   if (/what model are you/.test(lastUser)) {
     const system = messages.find((m) => m.role === "system")?.content || "";
     return { kind: "text", text: system.includes('running as the model "mock-model"') ? "I am mock-model via Mock." : "I don't know which model I am." };
@@ -108,6 +117,13 @@ function decide(messages) {
   // A reply that streams its first words, then stalls, so the side panel can
   // be poked mid-run (the model-switch note must wait for the run to end).
   if (/hold your reply/.test(lastUser)) return { kind: "text", text: "Holding on... done holding.", stallMs: 2500 };
+
+  // Composer attachment: answer only from the image the request carries, so the
+  // reply proves the pasted image reached the provider in the same turn.
+  if (/attached image/.test(lastUser)) {
+    const hasImage = messages.some((m) => Array.isArray(m.content) && m.content.some((p) => p && p.type === "image_url"));
+    return { kind: "text", text: hasImage ? "image_seen=yes" : "image_seen=no" };
+  }
 
   // Context retention: only answerable if the FIRST turn is still in the
   // conversation when the follow-up arrives (tests survival of a worker restart).
@@ -339,14 +355,23 @@ function startServer() {
           bodyObj = JSON.parse(body);
         } catch {}
         const messages = bodyObj.messages || [];
+        let reqImages = 0;
         for (const m of messages) {
           if (Array.isArray(m.content))
             for (const p of m.content)
               if (p && p.type === "image_url") {
                 sawImage = true;
+                reqImages++;
                 lastImageUrl = (p.image_url && p.image_url.url) || "";
+                // A PNG's IHDR chunk carries its dimensions, so the mock can
+                // prove the composer downscaled a pasted image.
+                const buf = Buffer.from((lastImageUrl.split(",")[1] || ""), "base64");
+                if (buf.length > 24 && buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) {
+                  lastImageDims = { w: buf.readUInt32BE(16), h: buf.readUInt32BE(20) };
+                }
               }
         }
+        if (reqImages) imageRequests++;
         // A model-suitability probe: answer it as a fully capable model would.
         // Checked before the no-tools branch below — the text and vision probes
         // carry no tools either.
@@ -1336,6 +1361,136 @@ async function main() {
     const imgB64 = lastImageUrl.split(",")[1] || "";
     check(imgB64.length > 0 && imgB64.length < 2000, `image-tab: attached the direct full-res image, not a viewport screenshot (base64 len ${imgB64.length})`);
     await imgPage.close();
+    await testPage.bringToFront();
+
+    // --- Composer attachments: paste, picker, drop, downscale, caps, History ---
+    const attPanel = await context.newPage();
+    await attPanel.goto(`chrome-extension://${extId}/src/sidepanel/sidepanel.html`, { waitUntil: "load" });
+    await attPanel.waitForTimeout(400);
+    await attPanel.click("#new-chat");
+    await attPanel.waitForTimeout(300);
+
+    // A paste built inside the page: a canvas blob into a DataTransfer, pasted
+    // into the composer. This is the same event a Ctrl+V of a screenshot fires.
+    const pasteImage = (w, h, type = "image/png") =>
+      attPanel.evaluate(async ([w, h, type]) => {
+        const c = document.createElement("canvas");
+        c.width = w;
+        c.height = h;
+        const g = c.getContext("2d");
+        g.fillStyle = "#3b82f6";
+        g.fillRect(0, 0, w, h);
+        const blob = await new Promise((r) => c.toBlob(r, type));
+        const dt = new DataTransfer();
+        dt.items.add(new File([blob], "shot.png", { type }));
+        const ta = document.getElementById("input");
+        ta.focus();
+        ta.dispatchEvent(new ClipboardEvent("paste", { clipboardData: dt, bubbles: true, cancelable: true }));
+        return blob.size;
+      }, [w, h, type]);
+
+    const attThumbs = () => attPanel.$$eval("#attach-strip .att-thumb", (n) => n.length).catch(() => 0);
+    const attNotes = () => attPanel.$$eval(".note", (n) => n.map((e) => e.textContent)).catch(() => []);
+    const waitThumbs = async (want) => {
+      for (let i = 0; i < 60; i++) {
+        if ((await attThumbs()) === want) return true;
+        await new Promise((r) => setTimeout(r, 100));
+      }
+      return false;
+    };
+    const attIdle = async (prevAnswers) => {
+      for (let i = 0; i < 120; i++) {
+        const idle = await attPanel.$eval("#send-btn", (el) => !el.hidden).catch(() => false);
+        const answers = await attPanel.$$eval(".msg.assistant", (n) => n.length).catch(() => 0);
+        if (idle && answers > prevAnswers) return answers;
+        await new Promise((r) => setTimeout(r, 200));
+      }
+      return -1;
+    };
+    const attAnswer = () => attPanel.$$eval(".msg.assistant", (n) => (n[n.length - 1] || {}).textContent || "").catch(() => "");
+
+    lastImageUrl = "";
+    imageRequests = 0;
+    const pasteSize = await pasteImage(60, 40);
+    check(await waitThumbs(1), `attach: a pasted PNG adds a thumbnail (blob ${pasteSize} bytes)`);
+    check(await attPanel.$eval("#attach-strip .att-thumb", (el) => el.naturalWidth > 0), "attach: the data: thumbnail renders under MV3's CSP");
+    await attPanel.fill("#input", "What is in the attached image?");
+    await testPage.bringToFront();
+    await attPanel.click("#send-btn");
+    const attA = await attIdle(0);
+    check(attA > 0, "attach: the run completed through the composer");
+    check((await attAnswer()) === "image_seen=yes", `attach: the image reached the provider in the same turn (got "${await attAnswer()}")`);
+    check(lastImageUrl.startsWith("data:image/png;base64,"), `attach: the provider got a PNG data URI (got "${lastImageUrl.slice(0, 26)}")`);
+    check(imageRequests === 1, `attach: exactly one request carried the image (${imageRequests})`);
+    check((await attPanel.$$eval(".msg.user img.att-thumb.sent", (n) => n.length).catch(() => 0)) === 1, "attach: the user bubble shows the image");
+    check((await attThumbs()) === 0, "attach: the strip clears after the send");
+
+    // Downscale: a 2000x2000 paste arrives at Anthropic's standard-tier long edge.
+    await attPanel.click("#new-chat");
+    await attPanel.waitForTimeout(300);
+    lastImageDims = { w: 0, h: 0 };
+    await pasteImage(2000, 2000);
+    check(await waitThumbs(1), "attach-big: a 2000x2000 paste is accepted");
+    await attPanel.fill("#input", "What is in the attached image?");
+    await attPanel.click("#send-btn");
+    await attIdle(0);
+    check(lastImageDims.w === 1568 && lastImageDims.h === 1568, `attach-big: downscaled to the 1568px long edge (got ${lastImageDims.w}x${lastImageDims.h})`);
+
+    // Size cap: a 6 MB file is refused before any decode, with a note.
+    await attPanel.click("#new-chat");
+    await attPanel.waitForTimeout(300);
+    await attPanel.evaluate(async () => {
+      const dt = new DataTransfer();
+      dt.items.add(new File([new Uint8Array(6 * 1024 * 1024)], "big.png", { type: "image/png" }));
+      const ta = document.getElementById("input");
+      ta.focus();
+      ta.dispatchEvent(new ClipboardEvent("paste", { clipboardData: dt, bubbles: true, cancelable: true }));
+    });
+    const capNotes = await attNotes();
+    check((await attThumbs()) === 0 && capNotes.some((t) => /5 MB/.test(t)), `attach-cap: a 6 MB file is refused with the size note (notes: ${JSON.stringify(capNotes)})`);
+
+    // Count cap: the fifth image is refused, four thumbnails stay.
+    for (let i = 0; i < 5; i++) await pasteImage(40, 30);
+    const countNotes = await attNotes();
+    check((await waitThumbs(4)) && countNotes.some((t) => /4 images/.test(t)), `attach-cap: the fifth image is refused (thumbs ${await attThumbs()})`);
+
+    // The file picker path. The input is hidden, so it is shown for the set.
+    await attPanel.click("#new-chat");
+    await attPanel.waitForTimeout(300);
+    await attPanel.evaluate(() => (document.getElementById("attach-input").hidden = false));
+    await attPanel.setInputFiles("#attach-input", { name: "pick.png", mimeType: "image/png", buffer: IMG_PNG });
+    check(await waitThumbs(1), "attach: the file picker adds a thumbnail");
+
+    // The drag-and-drop path.
+    await attPanel.evaluate(async () => {
+      const c = document.createElement("canvas");
+      c.width = 50;
+      c.height = 50;
+      const blob = await new Promise((r) => c.toBlob(r, "image/png"));
+      const dt = new DataTransfer();
+      dt.items.add(new File([blob], "drop.png", { type: "image/png" }));
+      const f = document.getElementById("composer");
+      f.dispatchEvent(new DragEvent("dragover", { dataTransfer: dt, bubbles: true, cancelable: true }));
+      f.dispatchEvent(new DragEvent("drop", { dataTransfer: dt, bubbles: true, cancelable: true }));
+    });
+    check(await waitThumbs(2), `attach: a dropped file adds a thumbnail (thumbs ${await attThumbs()})`);
+
+    // Remove: the × on a chip takes just that image out.
+    await attPanel.click("#attach-strip .att-chip:first-child .att-remove");
+    check(await waitThumbs(1), `attach: the remove button takes one image out (thumbs ${await attThumbs()})`);
+
+    // History keeps the words of the attachment turn and never the image.
+    const attBodies = await optPage.evaluate(
+      async ([idxKey, prefix]) => {
+        const all = await chrome.storage.local.get(null);
+        return Object.entries(all).filter(([k]) => k.startsWith(prefix)).map(([, v]) => JSON.stringify(v));
+      },
+      [SESSIONS_INDEX_KEY, SESSION_BODY_PREFIX],
+    );
+    check(attBodies.some((b) => /What is in the attached image\?/.test(b)), "attach: History keeps the text of the attachment turn");
+    check(!attBodies.some((b) => b.includes("data:image")), "attach: History never stores the image");
+
+    await attPanel.close();
     await testPage.bringToFront();
 
     // --- Stuck-panel recovery: Stop and orphaned prompt answers always emit

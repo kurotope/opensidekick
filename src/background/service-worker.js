@@ -36,6 +36,7 @@ import {
   touchesSensitiveSite,
   emptyIndex,
 } from "./sessions.js";
+import { validateImages, ATTACH_NOTES } from "../common/attachments.js";
 import { resolveSource, isNoteworthyChange, featureEnabled, thresholdFor } from "./decisions.js";
 import { runAgent } from "./agent.js";
 import { detachAll } from "./cdp.js";
@@ -593,8 +594,20 @@ async function handleRunTask(msg) {
   await loadLive();
   if (msg.newChat) await resetLive();
   if (!session) session = { id: crypto.randomUUID(), sensitive: false };
-  conversation.push({ role: "user", content: msg.task });
-  emit({ kind: "user_echo", text: msg.task });
+  // The panel caps attachments, but the panel is not the trust boundary: the
+  // worker re-checks the list before it enters the conversation that goes to
+  // the provider.
+  const images = Array.isArray(msg.images) ? msg.images.filter((i) => i && i.mediaType && i.data) : [];
+  if (msg.images && msg.images.length) {
+    const v = validateImages(msg.images);
+    if (!v.ok) {
+      emit({ kind: "error", error: "Attachment rejected: " + ATTACH_NOTES[v.reason] });
+      emit({ kind: "idle" });
+      return { ok: false, error: "bad-attachment" };
+    }
+  }
+  conversation.push({ role: "user", content: msg.task, ...(images.length ? { images } : {}) });
+  emit({ kind: "user_echo", text: msg.task, imageCount: images.length });
   // Captured now: New chat mid-run must not redirect this run's save.
   const runSession = session;
   const runConversation = conversation;

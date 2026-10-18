@@ -376,10 +376,13 @@ function toAnthropicMessages(messages) {
     if (m.role === "system") continue;
     if (m.role === "user") {
       const blocks = [];
-      if (m.content) blocks.push({ type: "text", text: m.content });
+      // Images before text: Anthropic documents that images placed before the
+      // query perform best, and a user turn with an attachment is exactly that
+      // shape.
       for (const img of m.images || []) {
         blocks.push({ type: "image", source: { type: "base64", media_type: img.mediaType, data: img.data } });
       }
+      if (m.content) blocks.push({ type: "text", text: m.content });
       if (!blocks.length) blocks.push({ type: "text", text: m.content || "" });
       pushAnthropic(out, "user", blocks);
     } else if (m.role === "assistant") {

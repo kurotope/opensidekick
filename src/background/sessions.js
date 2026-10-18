@@ -50,14 +50,16 @@ export function stripImages(messages) {
 }
 
 // What the user saw: their prompts and the assistant's text (or a finish
-// summary). Tool traffic, internal plumbing and images never reach disk.
+// summary). Tool traffic, internal plumbing and images never reach disk. An
+// attachment's words are kept and its image dropped, so a pasted screenshot
+// stays out of History while the question the user asked with it survives.
 export function visibleTurns(messages) {
   const out = [];
   if (!Array.isArray(messages)) return out;
   for (const m of messages) {
     if (!m || typeof m !== "object") continue;
     if (m.role === "user") {
-      if (typeof m.content === "string" && m.content && !m.images && !m.internal) {
+      if (typeof m.content === "string" && m.content && !m.internal) {
         out.push({ role: "user", content: m.content });
       }
     } else if (m.role === "assistant") {

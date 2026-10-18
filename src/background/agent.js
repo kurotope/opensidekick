@@ -105,7 +105,10 @@ export async function runAgent(deps) {
   const touchedTabs = new Set(); // tabs we showed the activity overlay on
   let observedOrigin = null; // origin of the page the agent last read
   const lastElements = new Map(); // ref -> accessible name, from the last read_page
-  let sentImage = false; // a screenshot has been added to the conversation
+  // An image is in the conversation: the user's own attachment, a screenshot
+  // from an earlier turn, or one restored from a continued chat. The vision
+  // warning below fires when the provider rejects the request because of it.
+  let sentImage = conversation.some((m) => m && m.role === "user" && m.images && m.images.length);
   let focusedTabId = initialTabId;
 
   // Optional smart checks (Jev). `dsrc` is null unless the user switched them on
@@ -212,7 +215,7 @@ export async function runAgent(deps) {
       } else if (sentImage) {
         emit({
           kind: "warning",
-          text: "That request included a screenshot, which the model rejected — it may be text-only. Switch to a multimodal model (e.g. gpt-4o-mini, gpt-4o, claude-3.5-sonnet) or turn off vision in Settings.",
+          text: "That request included an image, which the model rejected — it may be text-only. Switch to a multimodal model (e.g. gpt-4o-mini, gpt-4o, claude-3.5-sonnet) or turn off vision in Settings.",
         });
       }
       emit({ kind: "error", error: msg });

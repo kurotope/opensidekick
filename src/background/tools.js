@@ -3,6 +3,7 @@
 // provider layer converts them to the right wire format.
 
 import { MSG } from "../common/constants.js";
+import { IMAGE_TYPES } from "../common/attachments.js";
 import { readConsole, readNetwork } from "./cdp.js";
 
 export const TOOL_DEFS = [
@@ -476,8 +477,8 @@ async function screenshot(ctx) {
 }
 
 const IMAGE_URL_RE = /^https?:\/\/[^?#]+\.(jpe?g|png|gif|webp|bmp|avif)(\?[^#]*)?(#.*)?$/i;
-// Model-accepted image media types; other formats fall back to a screenshot.
-const MODEL_IMAGE_TYPES = new Set(["image/jpeg", "image/png", "image/gif", "image/webp"]);
+// The accepted media types (IMAGE_TYPES) live in common/attachments.js, shared
+// with the composer, so the two paths cannot drift apart.
 
 // When a tab points straight at an image, fetch its bytes and return
 // { mediaType, data } for direct attachment. Returns null (→ fall back to a
@@ -489,7 +490,7 @@ async function fetchDirectImage(url) {
     if (!res.ok) return null;
     const blob = await res.blob();
     const mediaType = (blob.type || "").toLowerCase();
-    if (!MODEL_IMAGE_TYPES.has(mediaType)) return null;
+    if (!IMAGE_TYPES.has(mediaType)) return null;
     // Guard against very large payloads (data URI base64 ≈ 1.37× bytes).
     if (blob.size > 12 * 1024 * 1024) return null;
     const buf = new Uint8Array(await blob.arrayBuffer());
