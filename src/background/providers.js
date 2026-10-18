@@ -24,8 +24,9 @@ const ANTHROPIC_VERSION = "2023-06-01";
 /**
  * Call the model once. Streams text via `onDelta` and returns the completed
  * normalized assistant turn: { content, toolCalls, stopReason, reasoning, usage }.
- * `usage` is { input, output } token counts, or null when the server reported
- * none — it is read from the stream, never sent anywhere, and stays on the device.
+ * `usage` is { input, output, cached } token counts, or null when the server
+ * reported none — `cached` is the part of `input` the server read from its own
+ * cache. It is read from the stream, never sent anywhere, and stays on the device.
  * `reasoning` is whatever a thinking model sent in a separate reasoning field
  * ("" when none). It never reaches `onDelta`, and nothing outside testModel()
  * reads it: it is not shown, saved or sent back to the model.
@@ -560,13 +561,17 @@ async function* sseStream(res) {
 }
 
 /**
- * Token counts in one shape: { input, output }. Servers say it three ways —
- * prompt_tokens / completion_tokens (OpenAI-style), prompt_eval_count /
+ * Token counts in one shape: { input, output, cached }. Servers say it three
+ * ways — prompt_tokens / completion_tokens (OpenAI-style), prompt_eval_count /
  * eval_count (Ollama's OpenAI-compatible endpoint), input_tokens /
  * output_tokens (Anthropic). Cache tokens count into input: the number should
- * be what the model processed, not just the uncached prefix. Null when nothing
- * usable is reported, so the UI can say "no counts from this server" instead of
- * showing zeros.
+ * be what the model processed, not just the uncached prefix. `cached` is the
+ * slice of input the server read from its own cache, so uncached is input -
+ * cached. Cache WRITES are not counted as cached: a write is billed above the
+ * input rate (Anthropic 1.25×, OpenAI on GPT-5.6+), so calling it a hit
+ * inflates the percentage the user reads. Null when nothing usable is
+ * reported, so the UI can say "no counts from this server" instead of showing
+ * zeros.
  */
 function normalizeUsage(raw) {
   if (!raw || typeof raw !== "object") return null;
@@ -577,7 +582,16 @@ function normalizeUsage(raw) {
     (n(raw.input_tokens) + n(raw.cache_read_input_tokens) + n(raw.cache_creation_input_tokens));
   const output = n(raw.completion_tokens) || n(raw.eval_count) || n(raw.output_tokens);
   if (!input && !output) return null;
-  return { input, output };
+  // Cache reads are named three ways too: OpenAI and OpenRouter nest
+  // cached_tokens in prompt_tokens_details, DeepSeek and Groq put a hit count
+  // at the top level, Anthropic calls it cache_read_input_tokens. Reading all
+  // three costs nothing — a server that has none reports 0.
+  const details = raw.prompt_tokens_details;
+  const cached = Math.min(
+    n(details && details.cached_tokens) || n(raw.prompt_cache_hit_tokens) || n(raw.cache_read_input_tokens),
+    input,
+  );
+  return { input, output, cached };
 }
 
 // Anthropic reports input in message_start and output cumulatively in
@@ -585,7 +599,11 @@ function normalizeUsage(raw) {
 function mergeUsage(a, b) {
   if (!a) return b;
   if (!b) return a;
-  return { input: Math.max(a.input, b.input), output: Math.max(a.output, b.output) };
+  return {
+    input: Math.max(a.input, b.input),
+    output: Math.max(a.output, b.output),
+    cached: Math.max(a.cached, b.cached),
+  };
 }
 
 function safeParseArgs(str) {

@@ -103,10 +103,15 @@
       <div id="model-line" class="model-line" hidden>
         <button type="button" id="model-chip" class="chip model-chip"><span class="mc-model"></span><span class="mc-sep" aria-hidden="true">·</span><span class="mc-provider"></span></button>
         <!-- Outside the chip: the chip opens Settings, so a number inside it
-             would be part of that click. -->
-        <span id="token-line" class="token-line" hidden></span>
+             would be part of that click. A button, not a span: the breakdown is
+             opened by a click, so it has to be focusable and announce its state. -->
+        <button type="button" id="token-line" class="token-line" hidden aria-expanded="false" aria-controls="token-card"></button>
       </div>
     </header>
+
+    <!-- The breakdown behind the token line. Built on the workflows menu's
+         pattern (positioned under the top bar, outside click closes). -->
+    <div id="token-card" class="wf-menu token-card" role="dialog" aria-label="Token usage" tabindex="-1" hidden></div>
 
     <div id="wf-menu" class="wf-menu" hidden></div>
     <!-- A non-modal dialog, not a menu: rows hold several buttons and an inline

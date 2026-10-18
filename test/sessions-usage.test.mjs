@@ -20,17 +20,26 @@ ok(same(cleanUsage({ input: 120, output: -5 }), { input: 120, output: 0 }), "cle
 ok(same(cleanUsage({ input: 120.5, output: 34 }), { input: 0, output: 34 }), "cleanUsage: non-integer dropped to 0");
 ok(same(cleanUsage({ input: 500, output: 0 }), { input: 500, output: 0 }), "cleanUsage: output-only counts kept");
 
+// ---- cached: the slice of input the provider read from its own cache ----
+ok(same(cleanUsage({ input: 1000, output: 20, cached: 900 }), { input: 1000, output: 20, cached: 900 }), "cleanUsage: cached slice kept");
+ok(same(cleanUsage({ input: 100, output: 5, cached: 400 }), { input: 100, output: 5, cached: 100 }), "cleanUsage: cached clamped to input");
+ok(same(cleanUsage({ input: 100, output: 5, cached: 0 }), { input: 100, output: 5 }), "cleanUsage: zero cached leaves the field out (no cache data, not 0%)");
+ok(same(cleanUsage({ input: 100, output: 5, cached: "many" }), { input: 100, output: 5 }), "cleanUsage: junk cached dropped");
+ok(same(cleanUsage({ input: 100, output: 5, cached: -3 }), { input: 100, output: 5 }), "cleanUsage: negative cached dropped");
+
 // ---- readIndex: counts kept, junk dropped ----
 const idx = readIndex({
   v: 1,
   currentId: "a",
   items: [
     { id: "a", title: "Chat A", createdAt: 10, updatedAt: 20, model: "m", provider: "P", usage: { input: 900, output: 120 } },
+    { id: "d", title: "Chat D", createdAt: 11, updatedAt: 19, usage: { input: 900, output: 120, cached: 700 } },
     { id: "b", title: "Chat B", updatedAt: 15, usage: { input: "many", output: null } },
     { id: "c", title: "Chat C", updatedAt: 14 },
   ],
 });
 ok(same(idx.items.find((i) => i.id === "a").usage, { input: 900, output: 120 }), "readIndex: counts kept on the entry");
+ok(same(idx.items.find((i) => i.id === "d").usage, { input: 900, output: 120, cached: 700 }), "readIndex: cached slice kept on the entry");
 ok(idx.items.find((i) => i.id === "b").usage === null, "readIndex: junk counts dropped to null");
 ok(idx.items.find((i) => i.id === "c").usage === null, "readIndex: entry with no counts gets null");
 
@@ -58,9 +67,9 @@ const plan = planSave({
   now: 100,
   model: "m",
   provider: "P",
-  usage: { input: 1500, output: 210 },
+  usage: { input: 1500, output: 210, cached: 1200 },
 });
-ok(same(plan.index.items[0].usage, { input: 1500, output: 210 }), "planSave: counts stored with the chat");
+ok(same(plan.index.items[0].usage, { input: 1500, output: 210, cached: 1200 }), "planSave: counts stored with the chat");
 
 // A second run in the same chat: the worker's total covers both runs.
 const plan2 = planSave({
@@ -77,6 +86,7 @@ const plan2 = planSave({
 });
 ok(plan2.index.items.length === 1, "planSave: second run updates the same entry");
 ok(same(plan2.index.items[0].usage, { input: 3100, output: 420 }), "planSave: second run's total replaces the first");
+ok(plan2.index.items[0].usage.cached === undefined, "planSave: a run reporting no cache data leaves no cached field");
 
 // A chat that never got counts (history off, provider silent) stores null, not zeros.
 const plan3 = planSave({

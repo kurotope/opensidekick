@@ -49,7 +49,7 @@ const openai = await serve((o, res) =>
   sse(res, [...say("hello"), { usage: { prompt_tokens: 120, completion_tokens: 34 } }]),
 );
 const r1 = await callModel(openaiFor(openai), { model: "m", messages: [{ role: "user", content: "hi" }] });
-eq(r1.usage, { input: 120, output: 34 }, "openai: prompt/completion tokens normalized");
+eq(r1.usage, { input: 120, output: 34, cached: 0 }, "openai: prompt/completion tokens normalized");
 eq(r1.content, "hello", "openai: text still streamed");
 eq(openai.bodies[0].stream_options, { include_usage: true }, "openai: usage asked for in the request");
 
@@ -58,7 +58,7 @@ const ollama = await serve((o, res) =>
   sse(res, [...say("local"), { usage: { prompt_eval_count: 800, eval_count: 40 } }]),
 );
 const r2 = await callModel(openaiFor(ollama), { model: "qwen3-vl:8b-instruct", messages: [{ role: "user", content: "hi" }] });
-eq(r2.usage, { input: 800, output: 40 }, "ollama: eval-count fields normalized to input/output");
+eq(r2.usage, { input: 800, output: 40, cached: 0 }, "ollama: eval-count fields normalized to input/output");
 
 // ---- Anthropic: input in message_start, output cumulative in message_delta ----
 const anthropic = await serve((o, res) =>
@@ -72,8 +72,53 @@ const anthropic = await serve((o, res) =>
   ]),
 );
 const r3 = await callModel(anthropicFor(anthropic), { model: "claude", maxTokens: 100, messages: [{ role: "user", content: "hi" }] });
-eq(r3.usage, { input: 6200, output: 150 }, "anthropic: cache tokens fold into input, output takes the cumulative total");
+eq(r3.usage, { input: 6200, output: 150, cached: 5000 }, "anthropic: cache reads fold into input and are kept as the cached slice, output takes the cumulative total");
 eq(r3.content, "claude", "anthropic: text still streamed");
+
+// ---- Cache reads: three names for the same slice of input ----
+const cachedSrv = await serve((o, res) =>
+  sse(res, [...say("cached"), { usage: { prompt_tokens: 1000, completion_tokens: 20, prompt_tokens_details: { cached_tokens: 900, cache_write_tokens: 40 } } }]),
+);
+const r7 = await callModel(openaiFor(cachedSrv), { model: "m", messages: [{ role: "user", content: "hi" }] });
+eq(r7.usage, { input: 1000, output: 20, cached: 900 }, "openai: cached_tokens read out of prompt_tokens_details");
+
+// DeepSeek and Groq put the hit count at the top level of usage.
+const hitSrv = await serve((o, res) =>
+  sse(res, [...say("hit"), { usage: { prompt_tokens: 600, completion_tokens: 12, prompt_cache_hit_tokens: 512, prompt_cache_miss_tokens: 88 } }]),
+);
+const r8 = await callModel(openaiFor(hitSrv), { model: "m", messages: [{ role: "user", content: "hi" }] });
+eq(r8.usage, { input: 600, output: 12, cached: 512 }, "top-level prompt_cache_hit_tokens read (DeepSeek/Groq shape)");
+
+// A server claiming more cached than input: a slice can't exceed the whole.
+const overSrv = await serve((o, res) =>
+  sse(res, [...say("over"), { usage: { prompt_tokens: 100, completion_tokens: 5, prompt_tokens_details: { cached_tokens: 400 } } }]),
+);
+const r9 = await callModel(openaiFor(overSrv), { model: "m", messages: [{ role: "user", content: "hi" }] });
+eq(r9.usage, { input: 100, output: 5, cached: 100 }, "cached clamped to input");
+
+// A cache WRITE is not a hit: Anthropic bills it above the input rate, so
+// counting it as cached inflates the percentage the user reads.
+const writeSrv = await serve((o, res) =>
+  sse(res, [
+    { type: "message_start", message: { usage: { input_tokens: 900, cache_creation_input_tokens: 100 } } },
+    { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "w" } },
+    { type: "message_delta", delta: {}, usage: { output_tokens: 5 } },
+  ]),
+);
+const r10 = await callModel(anthropicFor(writeSrv), { model: "claude", maxTokens: 100, messages: [{ role: "user", content: "hi" }] });
+eq(r10.usage, { input: 1000, output: 5, cached: 0 }, "cache write counted into input, not as a cache hit");
+
+// Anthropic reports cache fields in message_delta too, so the merge has to keep
+// the larger snapshot rather than the last one.
+const lateSrv = await serve((o, res) =>
+  sse(res, [
+    { type: "message_start", message: { usage: { input_tokens: 100, cache_read_input_tokens: 800 } } },
+    { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "late" } },
+    { type: "message_delta", delta: {}, usage: { output_tokens: 3, cache_read_input_tokens: 800 } },
+  ]),
+);
+const r11 = await callModel(anthropicFor(lateSrv), { model: "claude", maxTokens: 100, messages: [{ role: "user", content: "hi" }] });
+eq(r11.usage, { input: 900, output: 3, cached: 800 }, "cache read in message_delta merges as the larger snapshot");
 
 // ---- Nothing reported: null, not zeros, so the UI says nothing ----
 const silent = await serve((o, res) => sse(res, say("no counts")));

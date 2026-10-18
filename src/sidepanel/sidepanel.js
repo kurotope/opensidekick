@@ -44,6 +44,7 @@ const els = {
   modelLine: document.getElementById("model-line"),
   modelChip: document.getElementById("model-chip"),
   tokenLine: document.getElementById("token-line"),
+  tokenCard: document.getElementById("token-card"),
 };
 
 let savedPrompts = [];
@@ -145,6 +146,15 @@ async function init() {
   els.newChat.addEventListener("click", newChat);
   els.settings.addEventListener("click", () => chrome.runtime.openOptionsPage());
   els.modelChip.addEventListener("click", () => chrome.runtime.openOptionsPage());
+  els.tokenLine.addEventListener("click", toggleTokenCard);
+  // Escape closes the breakdown. Focus stays on the number after the click, so
+  // the keydown has to be on the button as well as the card.
+  els.tokenLine.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") hideTokenCard();
+  });
+  els.tokenCard.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") hideTokenCard();
+  });
   if (els.setupLink) els.setupLink.addEventListener("click", (e) => { e.preventDefault(); chrome.runtime.openOptionsPage(); });
   document.querySelectorAll(".examples li").forEach((li) =>
     li.addEventListener("click", () => {
@@ -246,14 +256,65 @@ function compactTokens(n) {
   return n >= 1000 ? (n / 1000).toFixed(n >= 10000 ? 0 : 1) + "k" : String(n);
 }
 
+// Cache reads as a share of input. Only worth saying when the server reported
+// cache data: a server that never reports it reads 0%, which is the app's
+// silence, not the user's behaviour, so the UI says nothing about cache.
+function cachePct(u) {
+  return u && u.cached > 0 && u.input > 0 ? Math.round((u.cached / u.input) * 100) : 0;
+}
+
 function renderTokenLine() {
-  if (!chatUsage || !(chatUsage.input + chatUsage.output)) {
+  const total = chatUsage ? chatUsage.input + chatUsage.output : 0;
+  if (!total) {
     els.tokenLine.hidden = true;
+    hideTokenCard();
     return;
   }
+  const hit = cachePct(chatUsage);
   els.tokenLine.hidden = false;
-  els.tokenLine.textContent = `${chatUsage.input.toLocaleString()} in · ${chatUsage.output.toLocaleString()} out`;
-  els.tokenLine.title = "Tokens this chat: prompt and completion, summed over every model call.";
+  els.tokenLine.textContent = `${compactTokens(total)} tok${hit ? ` · cache ${hit}%` : ""}`;
+  els.tokenLine.title = "Tokens this chat, summed over every model call. Click for the breakdown.";
+  els.tokenLine.setAttribute("aria-label", `${total.toLocaleString()} tokens this chat. Show the breakdown.`);
+  if (!els.tokenCard.hidden) renderTokenCard();
+}
+
+// The breakdown behind the token line: one row per count, label left, number
+// right. Cache rows appear only when the server reported cache reads.
+function renderTokenCard() {
+  const u = chatUsage;
+  if (!u || !(u.input + u.output)) return;
+  const hit = cachePct(u);
+  const rows = [["Total", `${(u.input + u.output).toLocaleString()} tok`]];
+  if (hit) {
+    rows.push(["Cache hit", `${hit}%`], ["Cached input", u.cached.toLocaleString()], ["Uncached input", (u.input - u.cached).toLocaleString()]);
+  } else {
+    rows.push(["Input", u.input.toLocaleString()]);
+  }
+  rows.push(["Output", u.output.toLocaleString()]);
+  els.tokenCard.innerHTML = rows
+    .map(([label, val]) => `<div class="tk-row"><span class="tk-label">${label}</span><span class="tk-val">${val}</span></div>`)
+    .join("");
+}
+
+function toggleTokenCard() {
+  if (!els.tokenCard.hidden) return hideTokenCard();
+  if (!chatUsage || !(chatUsage.input + chatUsage.output)) return;
+  renderTokenCard();
+  els.tokenCard.hidden = false;
+  els.tokenLine.setAttribute("aria-expanded", "true");
+  document.addEventListener("mousedown", tokenCardOutside, true);
+}
+
+function hideTokenCard() {
+  if (els.tokenCard.hidden) return;
+  els.tokenCard.hidden = true;
+  els.tokenLine.setAttribute("aria-expanded", "false");
+  document.removeEventListener("mousedown", tokenCardOutside, true);
+}
+
+function tokenCardOutside(e) {
+  if (els.tokenCard.contains(e.target) || els.tokenLine.contains(e.target)) return;
+  hideTokenCard();
 }
 
 // -------------------------------------------------------------------------
@@ -530,6 +591,7 @@ function handleEvent(ev) {
       chatUsage = {
         input: (chatUsage ? chatUsage.input : 0) + ev.input,
         output: (chatUsage ? chatUsage.output : 0) + ev.output,
+        cached: (chatUsage && chatUsage.cached ? chatUsage.cached : 0) + (ev.cached || 0),
       };
       renderTokenLine();
       break;
@@ -1358,7 +1420,7 @@ function renderHistoryMenu(res) {
       const tip = escapeHtml(
         `${it.title}\n${new Date(it.updatedAt).toLocaleString()}${who ? ` · ${who}` : ""}${
           it.usage ? ` · ${it.usage.input.toLocaleString()} in / ${it.usage.output.toLocaleString()} out` : ""
-        }`,
+        }${it.usage && cachePct(it.usage) ? ` · ${it.usage.cached.toLocaleString()} cached (${cachePct(it.usage)}%)` : ""}`,
       ).replace(/\n/g, "&#10;");
       const model = it.model ? `<span aria-hidden="true">·</span><span class="hist-model">${escapeHtml(it.model)}</span>` : "";
       return (

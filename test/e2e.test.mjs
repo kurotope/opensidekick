@@ -226,7 +226,8 @@ function probeKind(bodyObj) {
 
 // Every mock reply reports the same token counts, so the chat total is a fixed
 // multiple of the number of provider calls and the checks can name the number.
-const MOCK_USAGE = { usage: { prompt_tokens: 1200, completion_tokens: 45 } };
+// The cache slice is fixed too, so the cache percentage is a known number.
+const MOCK_USAGE = { usage: { prompt_tokens: 1200, completion_tokens: 45, prompt_tokens_details: { cached_tokens: 1000 } } };
 
 function sseText(res, text) {
   res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", "access-control-allow-origin": "*" });
@@ -2132,33 +2133,51 @@ async function main() {
     await optPage.evaluate(([key, cfg]) => chrome.storage.local.set({ [key]: cfg }), [STORAGE_KEY, config]);
 
     // --- Token counts (cost meter) ---
-    // The mock reports 1200 in / 45 out on every provider call, so the chat's
-    // total is a known number: the model line, the saved chat, the history row
-    // and a reopened chat all have to agree.
+    // The mock reports 1200 in / 45 out with 1000 of the input read from cache on
+    // every provider call, so the chat's total and its cache share are known
+    // numbers: the model line, the breakdown card, the saved chat, the history
+    // row and a reopened chat all have to agree.
     const tokPanel = await context.newPage();
     await tokPanel.goto(`chrome-extension://${extId}/src/sidepanel/sidepanel.html`, { waitUntil: "load" });
     await tokPanel.waitForTimeout(400);
     await tokPanel.click("#new-chat");
     await tokPanel.waitForTimeout(300);
     const tokenText = (pg) => pg.$eval("#token-line", (el) => (el.hidden ? "" : el.textContent)).catch(() => "");
+    const cardRows = (pg) =>
+      pg.$$eval("#token-card .tk-row", (rows) => rows.map((r) => [r.querySelector(".tk-label").textContent, r.querySelector(".tk-val").textContent]));
     check((await tokenText(tokPanel)) === "", "usage: a fresh chat shows no counts");
     const t1 = await panelSend(tokPanel, "The magic word is plum. Acknowledge.", 0);
     check(t1 > 0, "usage: first turn completed through the composer");
     await tokPanel.waitForFunction(() => !document.querySelector("#token-line").hidden, null, { timeout: 5000 });
     const tok1 = await tokenText(tokPanel);
-    check(tok1 === "1,200 in · 45 out", `usage: model line shows one call's counts (got "${tok1}")`);
+    check(tok1 === "1.2k tok · cache 83%", `usage: model line shows the total and the cache share (got "${tok1}")`);
     const t2 = await panelSend(tokPanel, "What is the magic word?", t1);
     const tok2 = await tokenText(tokPanel);
-    check(tok2 === "2,400 in · 90 out", `usage: counts add up across calls in one chat (got "${tok2}")`);
+    check(tok2 === "2.5k tok · cache 83%", `usage: counts add up across calls in one chat (got "${tok2}")`);
     const usageHit = await waitHistory((h) => h.index?.items?.[0]?.usage?.input === 2400);
     const savedUsage = usageHit.index?.items?.[0]?.usage;
-    check(savedUsage && savedUsage.input === 2400 && savedUsage.output === 90,
-      `usage: the saved chat stores the chat total (got ${JSON.stringify(savedUsage)})`);
-    // The history row carries the count, compacted to fit the row.
+    check(savedUsage && savedUsage.input === 2400 && savedUsage.output === 90 && savedUsage.cached === 2000,
+      `usage: the saved chat stores the chat total and its cached slice (got ${JSON.stringify(savedUsage)})`);
+    // The breakdown behind the token line: click opens it, an outside click closes it.
+    check(await tokPanel.$eval("#token-card", (el) => el.hidden), "usage: breakdown card starts closed");
+    await tokPanel.click("#token-line");
+    await tokPanel.waitForFunction(() => !document.querySelector("#token-card").hidden, null, { timeout: 5000 });
+    const rows = await cardRows(tokPanel);
+    const wantRows = [["Total", "2,490 tok"], ["Cache hit", "83%"], ["Cached input", "2,000"], ["Uncached input", "400"], ["Output", "90"]];
+    check(JSON.stringify(rows) === JSON.stringify(wantRows), `usage: breakdown card shows the split (got ${JSON.stringify(rows)})`);
+    check((await tokPanel.$eval("#token-line", (el) => el.getAttribute("aria-expanded"))) === "true", "usage: card reports its open state");
+    await tokPanel.click("#composer");
+    await tokPanel.waitForFunction(() => document.querySelector("#token-card").hidden, null, { timeout: 5000 });
+    check((await tokPanel.$eval("#token-line", (el) => el.getAttribute("aria-expanded"))) === "false", "usage: outside click closes the card");
+    // The history row carries the count, compacted to fit the row, and its
+    // tooltip gives the full numbers plus the cache share.
     await tokPanel.click("#history-btn");
     await tokPanel.waitForSelector(".hist-tokens", { timeout: 5000 });
     const rowTok = await tokPanel.$eval(".hist-item.current .hist-tokens", (el) => el.textContent).catch(() => "");
     check(rowTok === "2.5k tok", `usage: history row shows the chat's tokens (got "${rowTok}")`);
+    const rowTip = await tokPanel.$eval(".hist-item.current .hist-open", (el) => el.title).catch(() => "");
+    check(rowTip.includes("2,400 in / 90 out") && rowTip.includes("2,000 cached (83%)"),
+      `usage: history tooltip gives the full counts and cache share (got "${rowTip}")`);
     // New chat: the count goes back to nothing.
     await tokPanel.click("#new-chat");
     await tokPanel.waitForTimeout(300);
@@ -2169,7 +2188,7 @@ async function main() {
     await tokPanel.click(".hist-item .hist-open");
     await tokPanel.waitForFunction(() => !document.querySelector("#token-line").hidden, null, { timeout: 5000 });
     const tok3 = await tokenText(tokPanel);
-    check(tok3 === "2,400 in · 90 out", `usage: reopening the saved chat restores its counts (got "${tok3}")`);
+    check(tok3 === "2.5k tok · cache 83%", `usage: reopening the saved chat restores its counts (got "${tok3}")`);
     await tokPanel.close();
 
     // --- First-run / unconfigured (keep these LAST; they wipe the provider) ---

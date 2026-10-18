@@ -125,16 +125,21 @@ export function emptyIndex() {
 const str = (v) => (typeof v === "string" && v ? v : null);
 
 /**
- * Token counts a chat has used, in one shape: { input, output } or null.
- * Storage hands back anything, so junk counts are dropped rather than shown:
- * a number that is not a non-negative integer is not a token count.
+ * Token counts a chat has used, in one shape: { input, output, cached } or
+ * null. Storage hands back anything, so junk counts are dropped rather than
+ * shown: a number that is not a non-negative integer is not a token count.
+ * `cached` is the part of `input` the provider read from its own cache, so it
+ * can never exceed input; a server that reports no cache data leaves the field
+ * out, which is how the UI tells "no cache data" from "cache hit 0%".
  */
 export function cleanUsage(u) {
   if (!u || typeof u !== "object") return null;
   const n = (v) => (Number.isInteger(v) && v >= 0 ? v : 0);
   const input = n(u.input);
   const output = n(u.output);
-  return input || output ? { input, output } : null;
+  if (!input && !output) return null;
+  const cached = Math.min(n(u.cached), input);
+  return cached ? { input, output, cached } : { input, output };
 }
 
 // Tolerant of anything storage hands back: a malformed item is dropped rather
