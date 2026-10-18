@@ -46,7 +46,6 @@ const els = {
   send: document.getElementById("send-btn"),
   stop: document.getElementById("stop-btn"),
   newChat: document.getElementById("new-chat"),
-  settings: document.getElementById("open-settings"),
   status: document.getElementById("status-bar"),
   contextHint: document.getElementById("context-hint"),
   setupLink: document.getElementById("setup-link"),
@@ -215,7 +214,6 @@ async function init() {
   els.input.addEventListener("blur", () => setTimeout(hideSlashMenu, 150));
   els.stop.addEventListener("click", () => send({ type: MSG.STOP_TASK }));
   els.newChat.addEventListener("click", newChat);
-  els.settings.addEventListener("click", () => chrome.runtime.openOptionsPage());
   els.modelChip.addEventListener("click", () => chrome.runtime.openOptionsPage());
   els.tokenLine.addEventListener("click", toggleTokenCard);
   els.ctxLine.addEventListener("click", toggleCtxCard);

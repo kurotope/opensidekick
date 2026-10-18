@@ -2616,6 +2616,45 @@ async function main() {
     const rows5 = await cardRows(tokPanel);
     const wantRows5 = [["Total", "1,700 tok"], ["Cache hit", "67%"], ["Cached input", "1,000"], ["Cache write", "100"], ["Uncached input", "400"], ["Output", "200"]];
     check(JSON.stringify(rows5) === JSON.stringify(wantRows5), `usage: a cache write gets its own row (got ${JSON.stringify(rows5)})`);
+    // The header: the panel does not name the extension twice (the browser's own
+    // side panel header already does), and the reading comes first when the panel
+    // is too narrow to fit the reading and the controls on one row.
+    const headerRows = (pg) =>
+      pg.evaluate(() => {
+        const r = (s) => {
+          const el = document.querySelector(s);
+          return el && !el.hidden ? { top: Math.round(el.getBoundingClientRect().top), bottom: Math.round(el.getBoundingClientRect().bottom) } : null;
+        };
+        return { ml: r("#model-line"), ab: r(".topbar-actions"), brand: document.querySelector(".brand") };
+      });
+    const hrWide = await headerRows(tokPanel);
+    check(hrWide.brand === null, "header: the panel shows no brand row, text or icon (the browser header names the extension)");
+    check(Math.abs(hrWide.ml.top - hrWide.ab.top) < 4,
+      `header: at a wide panel the model line shares the row with the buttons (line top ${hrWide.ml.top}, buttons top ${hrWide.ab.top})`);
+    await tokPanel.setViewportSize({ width: 360, height: 700 });
+    const hrNarrow = await headerRows(tokPanel);
+    check(hrNarrow.ml.bottom <= hrNarrow.ab.top + 1,
+      `header: at 360px the model line sits above the buttons, not beside them (line bottom ${hrNarrow.ml.bottom}, buttons top ${hrNarrow.ab.top})`);
+    // Two rows, not three: as a flex item the brand icon stranded on its own row
+    // above the reading whenever the model line wrapped, which read as a broken header.
+    check(hrNarrow.ab.bottom - hrNarrow.ml.top <= 64,
+      `header: at 360px the header is two rows (line top ${hrNarrow.ml.top} to buttons bottom ${hrNarrow.ab.bottom})`);
+    // The pills keep their full text: the chip is the flexible part, so a narrow
+    // panel truncates the model id — a name you can check in Settings — not the
+    // meters, which ellipsizing to "1449k tok · cac…" would stop being a reading.
+    const pillFit = await tokPanel.evaluate(() => {
+      const p = document.querySelector("#token-line");
+      return { text: p.textContent, clip: p.scrollWidth > p.clientWidth + 1, flex: getComputedStyle(p).flex, sw: p.scrollWidth, cw: p.clientWidth };
+    });
+    check(!pillFit.clip && pillFit.flex === "0 0 auto",
+      `header: the cost pill keeps its full text at 360px (text "${pillFit.text}", flex "${pillFit.flex}", scroll ${pillFit.sw} vs box ${pillFit.cw})`);
+    const chipFlex = await tokPanel.$eval("#model-chip", (el) => getComputedStyle(el).flex);
+    check(chipFlex === "1 1 auto", `header: the model chip takes the free space (flex "${chipFlex}")`);
+    // Settings has one route: the model chip opens it, so the header has no second
+    // button for the same destination.
+    check((await tokPanel.$("#open-settings")) === null && (await tokPanel.$eval("#model-chip", (el) => el.tagName)) === "BUTTON",
+      "header: Settings is reached through the model chip, not a second button");
+    await tokPanel.setViewportSize({ width: 400, height: 700 });
     await tokPanel.close();
 
     // --- First-run / unconfigured (keep these LAST; they wipe the provider) ---

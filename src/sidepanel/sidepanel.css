@@ -38,15 +38,6 @@ body {
   flex: 0 0 auto;
 }
 
-.brand {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-weight: var(--os-w-semibold);
-  font-size: var(--os-fs-14);
-  line-height: var(--os-lh-14);
-}
-
 .topbar-actions {
   display: flex;
   gap: 0;
@@ -86,13 +77,20 @@ body {
 
 /* Which model answers: a second line of the top bar, opens Settings. A quiet
    outline pill; the ::after stretches the hit area to 32px tall. */
+/* Shares the top row when the panel is wide enough for it, and wraps below the
+   buttons when it is not. The reading is first in the header, so a narrow panel
+   puts the model line on top and the controls under it — the order a user reads. */
 .model-line {
-  flex: 1 0 100%;
+  flex: 1 1 auto;
   display: flex;
   min-width: 0;
   padding: 2px 0 4px;
 }
+/* The chip is the flexible part of the header: it takes the free space and
+   shrinks first, so a narrow panel truncates the model id — a name you can
+   check in Settings — rather than the two meters, which are the reading. */
 .model-chip {
+  flex: 1 1 auto;
   position: relative;
   height: 24px;
   max-width: 100%;
@@ -139,11 +137,12 @@ body {
    the model id, muted so it reads as a count. A button, not a span: the
    breakdown opens on a click, so it has to be focusable and announce its state.
    The border is the same as the model chip's: a pill with a border reads as a
-   control at rest, which a bare number beside a bordered chip does not. */
+   control at rest, which a bare number beside a bordered chip does not.
+   Fixed, not shrinkable: a meter that ellipsizes to "1449k tok · cac…" is not a
+   reading, so the chip gives up its width first. */
 .token-line {
   align-self: center;
-  flex: 0 1 auto;
-  min-width: 0;
+  flex: 0 0 auto;
   height: 24px;
   padding: 0 8px;
   border: 1px solid var(--os-line);
