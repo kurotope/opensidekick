@@ -14,6 +14,7 @@ import {
   TRIMMED_NOTE,
 } from "../common/constants.js";
 import { matchPrompts, isSlashQuery } from "../common/prompts.js";
+import { cacheHitText } from "../common/usage.js";
 import { relativeTime } from "../background/sessions.js";
 
 const els = {
@@ -256,13 +257,6 @@ function compactTokens(n) {
   return n >= 1000 ? (n / 1000).toFixed(n >= 10000 ? 0 : 1) + "k" : String(n);
 }
 
-// Cache reads as a share of input. Only worth saying when the server reported
-// cache data: a server that never reports it reads 0%, which is the app's
-// silence, not the user's behaviour, so the UI says nothing about cache.
-function cachePct(u) {
-  return u && u.cached > 0 && u.input > 0 ? Math.round((u.cached / u.input) * 100) : 0;
-}
-
 function renderTokenLine() {
   const total = chatUsage ? chatUsage.input + chatUsage.output : 0;
   if (!total) {
@@ -270,7 +264,7 @@ function renderTokenLine() {
     hideTokenCard();
     return;
   }
-  const hit = cachePct(chatUsage);
+  const hit = cacheHitText(chatUsage);
   els.tokenLine.hidden = false;
   els.tokenLine.textContent = `${compactTokens(total)} tok${hit ? ` · cache ${hit}%` : ""}`;
   els.tokenLine.title = "Tokens this chat, summed over every model call. Click for the breakdown.";
@@ -283,7 +277,7 @@ function renderTokenLine() {
 function renderTokenCard() {
   const u = chatUsage;
   if (!u || !(u.input + u.output)) return;
-  const hit = cachePct(u);
+  const hit = cacheHitText(u);
   // Total is the pill's number said again, so it is only worth a row when the
   // split under it makes the sum new information. Without cache data the card
   // is Input and Output, which is the whole story.
@@ -1430,7 +1424,7 @@ function renderHistoryMenu(res) {
       const tip = escapeHtml(
         `${it.title}\n${new Date(it.updatedAt).toLocaleString()}${who ? ` · ${who}` : ""}${
           it.usage ? ` · ${it.usage.input.toLocaleString()} in / ${it.usage.output.toLocaleString()} out` : ""
-        }${it.usage && cachePct(it.usage) ? ` · ${it.usage.cached.toLocaleString()} cached (${cachePct(it.usage)}%)` : ""}`,
+        }${it.usage && it.usage.cached ? ` · ${it.usage.cached.toLocaleString()} cached (${cacheHitText(it.usage)}%)` : ""}`,
       ).replace(/\n/g, "&#10;");
       const model = it.model ? `<span aria-hidden="true">·</span><span class="hist-model">${escapeHtml(it.model)}</span>` : "";
       return (

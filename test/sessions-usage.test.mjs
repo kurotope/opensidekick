@@ -2,7 +2,7 @@
 // tolerate junk from storage, and are replaced (not added) on each save because
 // the worker keeps the chat's running total and hands that total to planSave.
 
-import { cleanUsage, readIndex, upsertSession, planSave, emptyIndex } from "../src/background/sessions.js";
+import { readIndex, upsertSession, planSave, emptyIndex } from "../src/background/sessions.js";
 
 let fail = 0;
 const ok = (c, m) => { console.log((c ? "ok  : " : "FAIL: ") + m); if (!c) fail = 1; };
@@ -10,22 +10,6 @@ const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 
 const user = (content) => ({ role: "user", content });
 const asst = (content) => ({ role: "assistant", content });
-
-// ---- cleanUsage: what counts as a token count ----
-ok(same(cleanUsage({ input: 120, output: 34 }), { input: 120, output: 34 }), "cleanUsage: good shape kept");
-ok(cleanUsage({ input: 0, output: 0 }) === null, "cleanUsage: zeros are no counts");
-ok(cleanUsage(null) === null, "cleanUsage: null in, null out");
-ok(cleanUsage("1200 tok") === null, "cleanUsage: a string is not counts");
-ok(same(cleanUsage({ input: 120, output: -5 }), { input: 120, output: 0 }), "cleanUsage: negative dropped to 0");
-ok(same(cleanUsage({ input: 120.5, output: 34 }), { input: 0, output: 34 }), "cleanUsage: non-integer dropped to 0");
-ok(same(cleanUsage({ input: 500, output: 0 }), { input: 500, output: 0 }), "cleanUsage: output-only counts kept");
-
-// ---- cached: the slice of input the provider read from its own cache ----
-ok(same(cleanUsage({ input: 1000, output: 20, cached: 900 }), { input: 1000, output: 20, cached: 900 }), "cleanUsage: cached slice kept");
-ok(same(cleanUsage({ input: 100, output: 5, cached: 400 }), { input: 100, output: 5, cached: 100 }), "cleanUsage: cached clamped to input");
-ok(same(cleanUsage({ input: 100, output: 5, cached: 0 }), { input: 100, output: 5 }), "cleanUsage: zero cached leaves the field out (no cache data, not 0%)");
-ok(same(cleanUsage({ input: 100, output: 5, cached: "many" }), { input: 100, output: 5 }), "cleanUsage: junk cached dropped");
-ok(same(cleanUsage({ input: 100, output: 5, cached: -3 }), { input: 100, output: 5 }), "cleanUsage: negative cached dropped");
 
 // ---- readIndex: counts kept, junk dropped ----
 const idx = readIndex({

@@ -35,8 +35,8 @@ import {
   normalizeTitle,
   touchesSensitiveSite,
   emptyIndex,
-  cleanUsage,
 } from "./sessions.js";
+import { cleanUsage } from "../common/usage.js";
 import { resolveSource, isNoteworthyChange, featureEnabled, thresholdFor } from "./decisions.js";
 import { runAgent } from "./agent.js";
 import { detachAll } from "./cdp.js";
