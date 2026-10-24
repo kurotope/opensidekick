@@ -707,6 +707,11 @@ function startAssistant() {
   sealLog();
   const el = document.createElement("div");
   el.className = "msg assistant";
+  // Out of the transcript's polite live region while it streams. main#messages
+  // announces every change inside it, and every assistant_delta re-renders this
+  // bubble, so a reader hears the reply token by token. The bubble opts out here;
+  // endAssistant flips it back to polite so the finished reply is announced once.
+  el.setAttribute("aria-live", "off");
   el.innerHTML = '<span class="thinking"><span class="dot-pulse"></span>Thinking…</span>';
   els.messages.appendChild(el);
   current = { el, started: false, md: createStreamingRenderer(), timer: 0, tick: 16, lastHtml: "", copy: null };
@@ -777,6 +782,10 @@ function endAssistant(content) {
   if (html.trim()) {
     c.el.innerHTML = html;
     restoreCopy(c, focusIndex); // the final render replaces the controls too
+    // Back into the live region: the whole reply is there now, so the reader gets
+    // one announcement instead of one per delta. A turn that never reaches this
+    // line — no assistant_end, so the early return above — leaves the bubble off.
+    c.el.setAttribute("aria-live", "polite");
   } else {
     c.el.remove(); // pure tool-call turn with no visible text
   }

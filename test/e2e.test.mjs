@@ -1510,6 +1510,9 @@ async function main() {
           newChat: box("#new-chat").height,
           contextHint: box("#context-hint").height,
         },
+        // The working line is the panel's own live text: role="status" is the
+        // contract that lets a reader hear "Working…" without a keyboard move.
+        statusRole: document.getElementById("status-bar").getAttribute("role") || "",
       };
     });
     check(ui.title === "What should I do on this page?", `empty: the empty state asks one question (got "${ui.title}")`);
@@ -1518,6 +1521,7 @@ async function main() {
     check(ui.sendInField && ui.sendLabel === "Send", `composer: Send is an icon button inside the field labelled "Send" (in field ${ui.sendInField}, label "${ui.sendLabel}")`);
     check(ui.segUnder, "composer: the approval control sits under the field");
     check(Object.values(ui.heights).every((h) => h >= 32), `composer: Send, segments, New chat and the site chip are 32px+ targets (got ${JSON.stringify(ui.heights)})`);
+    check(ui.statusRole === "status", `panel: the status bar is a status region (role "${ui.statusRole}")`);
     await panel.close();
 
     // --- Scheduled task: "Run now" opens the URL and runs the task headlessly ---
@@ -1675,6 +1679,10 @@ async function main() {
     const bannerUp = await midPanel.$eval("#rec-banner", (e) => getComputedStyle(e).display !== "none").catch(() => false);
     const btnLit = await midPanel.$eval("#record-btn", (e) => e.classList.contains("recording")).catch(() => false);
     check(bannerUp && btnLit, `wf-persist: reopened panel resumes the live recording banner (banner=${bannerUp}, btn=${btnLit})`);
+    // The step count is a fact the sighted user sees. role="status" is what makes
+    // it a fact a reader hears as it changes.
+    const bannerRole = await midPanel.$eval("#rec-banner", (e) => e.getAttribute("role") || "").catch(() => "");
+    check(bannerRole === "status", `recording: the banner is a status region (role "${bannerRole}")`);
     await optPage.evaluate((t) => chrome.runtime.sendMessage({ type: t }), MSG.STOP_RECORDING);
     await midPanel.close();
 
@@ -2646,6 +2654,13 @@ async function main() {
             copyDisabled: [...last.querySelectorAll(".md-copy")].map((b) => b.getAttribute("aria-disabled") === "true"),
             focusCopy: document.activeElement.classList.contains("md-copy"),
             text: last.textContent,
+            // The live-region read: a bubble that streams inside main#messages,
+            // which is a polite region, is read aloud on every delta. The bubble
+            // has to opt out while it streams and opt back in when it is done, so
+            // a reply is announced once. running proves the probe is mid-stream
+            // (Send is hidden while the agent works), not a late read of the end.
+            live: last.getAttribute("aria-live") || "",
+            running: document.getElementById("send-btn").hidden,
           };
         })
         .catch(() => null);
@@ -2759,9 +2774,20 @@ async function main() {
       return d.innerHTML;
     }, midPrefix);
     check(midStream && midStream.html === expectedMid, `markdown: the mid-stream DOM is the render of the text sent so far (${domDiff(midStream && midStream.html, expectedMid)})`);
+    // Mid-stream, in the stall window: the bubble must be out of the live region.
+    check(
+      midStream && midStream.running && midStream.live === "off",
+      `markdown: the streaming bubble is aria-live off mid-stream (got ${JSON.stringify(midStream && [midStream.live, midStream.running])})`,
+    );
     const streamedDone = await panelIdle(mdPanel, streamBase);
     check(streamedDone > streamBase, "markdown: the streamed markdown turn completed");
     const streamed = await mdProbe(mdPanel);
+    // The same element, now finished, must be in the live region: one announced
+    // reply, not one announcement per delta.
+    check(
+      streamed && streamed.live === "polite" && !streamed.running,
+      `markdown: the finished reply is polite (got ${JSON.stringify(streamed && [streamed.live, streamed.running])})`,
+    );
     const oneShot = await panelSend(mdPanel, "Format the answer as markdown", streamedDone);
     check(oneShot > streamedDone, "markdown: the single-shot markdown turn completed");
     const final = await mdProbe(mdPanel);
