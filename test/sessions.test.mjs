@@ -53,7 +53,9 @@ const item = (id, updatedAt, extra = {}) => ({ id, title: "chat " + id, createdA
     user("pic", { images: [{ mediaType: "image/png", data: "x" }] }),
     asst("I see a chart."),
   ]);
-  ok(same(v, [user("Look at this"), asst("I see a chart.")]), "visibleTurns: drops internal and image-carrying user messages");
+  // The words the user typed with a pasted image are kept; the image is not.
+  ok(same(v, [user("Look at this"), user("pic"), asst("I see a chart.")]), "visibleTurns: keeps an attachment's text, drops internal turns");
+  ok(v.every((m) => !m.images), "visibleTurns: no image reaches History");
 }
 {
   const v = visibleTurns([user("Do it"), asst("  ", { toolCalls: [{ name: "finish", args: { summary: "Typed it." } }] })]);
@@ -97,6 +99,14 @@ const item = (id, updatedAt, extra = {}) => ({ id, title: "chat " + id, createdA
   ok(out[3].images === undefined && out[3].content === "Here is the screenshot you requested:",
     "stripImages: replaces images with the placeholder and leaves other messages identical (caption kept)");
   ok(shot.images.length === 1, "stripImages: replaces images with the placeholder and leaves other messages identical (input untouched)");
+}
+{
+  // The agent seeds its vision warning by scanning the conversation for an
+  // image. A continued chat is read back through stripImages (service-worker's
+  // session write), so this is the rule that makes a restored image impossible:
+  // nothing that comes out of stripImages has images, and the scan sees none.
+  const out = stripImages([user("q"), user("pic", { images: [{ mediaType: "image/png", data: "x" }] }), asst("a")]);
+  ok(out.every((m) => !m.images), "stripImages: no message survives with images, so a resumed chat has none to re-send");
 }
 
 // --- capTurns ---
@@ -293,6 +303,12 @@ const save = (extra = {}) => planSave({
     "planSave: the saved body holds only visible, capped turns (no tool output)");
   ok(r.body.messages[3].content.endsWith(TRIM_MARK) && r.body.trimmed === undefined,
     "planSave: the saved body holds only visible, capped turns (capped, not marked as trimmed)");
+}
+{
+  // An attachment's words survive into History, its pixels do not, so a chat
+  // opened from History has nothing to send back to the provider.
+  const r = save({ conversation: [user("q"), user("Here is the screenshot:", { images: [{ mediaType: "image/png", data: "x" }] }), asst("a")] });
+  ok(r.body.messages.every((m) => !m.images), "planSave: no image reaches the saved body");
 }
 {
   const before = { v: 1, currentId: "s1", items: [item("s1", 5), item("b", 4)] };

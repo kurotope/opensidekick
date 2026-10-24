@@ -79,7 +79,6 @@ await callModel(
   { model: "m", messages: withImage, tools: [] },
 );
 const oi = captured.messages;
-eq(oi[1].role, "user", "openai image: role user");
 eq(oi[1].content[0], { type: "text", text: "Here is the screenshot:" }, "openai image: text part first");
 eq(oi[1].content[1], { type: "image_url", image_url: { url: "data:image/png;base64,AAAB" } }, "openai image: image_url data URI");
 
@@ -90,8 +89,55 @@ await callModel(
 const ai = captured.messages;
 // The two user messages merge into one Anthropic user turn.
 eq(ai.length, 1, "anthropic image: user turns merged");
-eq(ai[0].content[1], { type: "text", text: "Here is the screenshot:" }, "anthropic image: text block");
-eq(ai[0].content[2], { type: "image", source: { type: "base64", media_type: "image/png", data: "AAAB" } }, "anthropic image: base64 image block");
+// Images come before the text of their turn: Anthropic documents that images
+// placed before the query perform best.
+eq(ai[0].content[1], { type: "image", source: { type: "base64", media_type: "image/png", data: "AAAB" } }, "anthropic image: base64 image block before its text");
+eq(ai[0].content[2], { type: "text", text: "Here is the screenshot:" }, "anthropic image: text block after the image");
+
+// ---- Composer attachment as the FIRST turn ----
+// A pasted image with its question is the whole conversation. Anthropic wants
+// messages[0] to be a user turn, and the image has to ride in that same turn.
+const attachFirst = [{ role: "user", content: "what's in this image?", images: [{ mediaType: "image/jpeg", data: "QUJD" }] }];
+
+await callModel(
+  { type: "openai", baseUrl: "https://x/v1", apiKey: "k" },
+  { model: "m", messages: attachFirst, tools: [] },
+);
+const of = captured.messages;
+eq(of.length, 1, "openai attachment: one message, no system prompt");
+eq(of[0].content[1].image_url.url, "data:image/jpeg;base64,QUJD", "openai attachment: the pasted image reaches the request");
+
+await callModel(
+  { type: "anthropic", baseUrl: "https://api.anthropic.com/v1", apiKey: "k" },
+  { model: "claude", maxTokens: 100, messages: attachFirst, tools: [] },
+);
+const af = captured.messages;
+eq(af[0].role, "user", "anthropic attachment: the first turn is a user turn");
+eq(af[0].content[1].text, "what's in this image?", "anthropic attachment: the question follows the image");
+
+// ---- The type on the wire is canonical, and nothing else rides with it ----
+// Mixed case is what a message from outside the panel can carry, so the wire is
+// the place to prove the canonical form. A planted field (a name the user's file
+// had) must not reach the provider — the image block is built from the two
+// fields the protocol defines, not from a spread of the object.
+const mixed = [{ role: "user", content: "look", images: [{ mediaType: "IMAGE/PNG", data: "AAAB", filename: "report.png", size: 1234 }] }];
+
+await callModel(
+  { type: "openai", baseUrl: "https://x/v1", apiKey: "k" },
+  { model: "m", messages: mixed, tools: [] },
+);
+const om = captured.messages;
+eq(om[0].content[1].image_url.url, "data:image/png;base64,AAAB", "openai: media_type is canonical lowercase from a mixed-case input");
+eq(JSON.stringify(om).includes("report.png"), false, "openai: a planted extra field never reaches the request body");
+
+await callModel(
+  { type: "anthropic", baseUrl: "https://api.anthropic.com/v1", apiKey: "k" },
+  { model: "claude", maxTokens: 100, messages: mixed, tools: [] },
+);
+const am = captured.messages;
+eq(am[0].content[0], { type: "image", source: { type: "base64", media_type: "image/png", data: "AAAB" } },
+  "anthropic: media_type is canonical lowercase from a mixed-case input");
+eq(JSON.stringify(captured).includes("report.png"), false, "anthropic: a planted extra field never reaches the request body");
 
 console.log(fail ? "\nSOME TESTS FAILED" : "\nALL CONVERSION TESTS PASSED");
 process.exitCode = fail;

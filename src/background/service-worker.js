@@ -36,6 +36,7 @@ import {
   touchesSensitiveSite,
   emptyIndex,
 } from "./sessions.js";
+import { validateImages, canonicalType, taskFor, ATTACH_NOTES } from "../common/attachments.js";
 import { resolveSource, isNoteworthyChange, featureEnabled, thresholdFor } from "./decisions.js";
 import { runAgent } from "./agent.js";
 import { detachAll } from "./cdp.js";
@@ -366,13 +367,26 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
 // -------------------------------------------------------------------------
 // Messaging
 // -------------------------------------------------------------------------
-chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   switch (msg.type) {
     case MSG.GET_STATE: {
       handleGetState().then(sendResponse);
       return true;
     }
     case MSG.RUN_TASK: {
+      // The door is the sender's origin, not the tab. Measured in the e2e harness:
+      // sender.tab is present for the side panel page and the options page exactly
+      // as it is for a content script (sender.frameId is 0 for all three), so a
+      // tab-based reject shut the user's own Send — the panel's send got
+      // "not-allowed" and no run started. sender.url is what separates them: an
+      // extension page reports chrome-extension://<id>/…, a content script reports
+      // the page's URL, so only the extension's own pages start a run. A normal
+      // page has no chrome.runtime to send from at all, which is why the worker
+      // still re-checks the list it is handed.
+      if (new URL(sender.url || "about:blank").origin !== location.origin) {
+        sendResponse({ ok: false, error: "not-allowed" });
+        return false;
+      }
       handleRunTask(msg).then(sendResponse);
       return true;
     }
@@ -593,8 +607,32 @@ async function handleRunTask(msg) {
   await loadLive();
   if (msg.newChat) await resetLive();
   if (!session) session = { id: crypto.randomUUID(), sensitive: false };
-  conversation.push({ role: "user", content: msg.task });
-  emit({ kind: "user_echo", text: msg.task });
+  // The panel caps attachments, but the panel is not the trust boundary: the
+  // worker re-checks the list before it enters the conversation that goes to
+  // the provider.
+  const requested = Array.isArray(msg.images) ? msg.images : [];
+  if (requested.length) {
+    const v = validateImages(requested);
+    if (!v.ok) {
+      emit({ kind: "error", error: "Attachment rejected: " + ATTACH_NOTES[v.reason] });
+      emit({ kind: "idle" });
+      return { ok: false, error: "bad-attachment" };
+    }
+  }
+  // Canonical lowercase types, so the list the provider sees is the list the
+  // check approved, whatever a sender declared.
+  const images = requested.map((img) => ({ mediaType: canonicalType(img.mediaType), data: img.data }));
+  // A sender that is not the panel can post an empty task with images. The
+  // shared fixed line is what the panel's bubble shows too, so the request and
+  // the transcript agree; an empty task with nothing attached is no task at all.
+  const task = taskFor(typeof msg.task === "string" ? msg.task : "", images);
+  if (!task) {
+    emit({ kind: "error", error: "Nothing to run — no prompt." });
+    emit({ kind: "idle" });
+    return { ok: false, error: "no-task" };
+  }
+  conversation.push({ role: "user", content: task, ...(images.length ? { images } : {}) });
+  emit({ kind: "user_echo", text: task });
   // Captured now: New chat mid-run must not redirect this run's save.
   const runSession = session;
   const runConversation = conversation;

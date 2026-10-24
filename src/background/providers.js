@@ -19,6 +19,11 @@
 // Normalized tool definition:
 //   { name, description, parameters: <JSON Schema object> }
 
+// The wire type is canonical lowercase. A message from outside the panel can
+// carry a mixed-case type, and Anthropic/OpenAI read media types literally, so
+// the canonical form is written at the wire, from the same rule the checks use.
+import { canonicalType } from "../common/attachments.js";
+
 const ANTHROPIC_VERSION = "2023-06-01";
 
 /**
@@ -244,7 +249,7 @@ function toOpenAIMessages(messages, system) {
         const parts = [];
         if (m.content) parts.push({ type: "text", text: m.content });
         for (const img of m.images) {
-          parts.push({ type: "image_url", image_url: { url: `data:${img.mediaType};base64,${img.data}` } });
+          parts.push({ type: "image_url", image_url: { url: `data:${canonicalType(img.mediaType)};base64,${img.data}` } });
         }
         out.push({ role: "user", content: parts });
       } else {
@@ -376,10 +381,15 @@ function toAnthropicMessages(messages) {
     if (m.role === "system") continue;
     if (m.role === "user") {
       const blocks = [];
-      if (m.content) blocks.push({ type: "text", text: m.content });
+      // Images before text: Anthropic documents that images placed before the
+      // query perform best, and a user turn with an attachment is exactly that
+      // shape.
       for (const img of m.images || []) {
-        blocks.push({ type: "image", source: { type: "base64", media_type: img.mediaType, data: img.data } });
+        // Built field by field: an image object may carry anything a caller put
+        // on it (a file name, a size), and none of that belongs on the wire.
+        blocks.push({ type: "image", source: { type: "base64", media_type: canonicalType(img.mediaType), data: img.data } });
       }
+      if (m.content) blocks.push({ type: "text", text: m.content });
       if (!blocks.length) blocks.push({ type: "text", text: m.content || "" });
       pushAnthropic(out, "user", blocks);
     } else if (m.role === "assistant") {
