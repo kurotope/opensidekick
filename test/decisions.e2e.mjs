@@ -26,7 +26,7 @@ import path from "node:path";
 import fs from "node:fs";
 import { fileURLToPath } from "node:url";
 import { chromium } from "playwright";
-import { STORAGE_KEY, TASK_RUNS_KEY, MSG } from "../src/common/constants.js";
+import { STORAGE_KEY, TASK_RUNS_KEY, SESSION_PENDING_WF_KEY, MSG } from "../src/common/constants.js";
 import { detectInjection } from "../src/background/safety.js";
 
 const EXT_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -770,6 +770,126 @@ async function main() {
       !/trust this site/i.test(mcpCard) && /Allow for this session/.test(mcpCard),
       `panel: the MCP card offers a session grant, never "trust this site" (got "${mcpCard.slice(0, 200)}")`,
     );
+
+    // === Card focus: the transcript takes focus only when nothing else has it ===
+    // A card lands at the end of #messages, and stealing focus mid-sentence sends
+    // the keystrokes to its button (threat 5). The exact rule: the primary button
+    // takes focus only when focus is on document.body, or inside #messages. After
+    // a choice the buttons are replaced by a note, so the note owns the focus and
+    // carries tabindex="-1" so a <p> can receive it (threat 12).
+    const focusOf = () =>
+      panel.evaluate(() => {
+        const a = document.activeElement;
+        return {
+          id: a.id,
+          tag: a.tagName,
+          text: (a.textContent || "").replace(/\s+/g, " ").trim().slice(0, 24),
+          note: a.classList.contains("muted-note"),
+          inMsg: document.getElementById("messages").contains(a),
+          tab: a.getAttribute("tabindex"),
+          cards: document.querySelectorAll(".perm-card").length,
+        };
+      });
+    // Every wait carries a catch: in a red run the assertion has to be reached,
+    // not aborted by a timeout that kills the suite.
+    const cardsAtLeast = (n) =>
+      panel.waitForFunction((k) => document.querySelectorAll(".perm-card").length >= k, n, { timeout: 5000 }).catch(() => {});
+    const askOnce = (id) => askPanel({ id, origin: "https://shop.example", toolName: "click_element", args: { ref: 3 }, sensitive: false });
+
+    // 1. Nothing is focused, so the card may take focus.
+    await panel.evaluate(() => document.activeElement.blur());
+    await askOnce(90003);
+    await cardsAtLeast(3);
+    const bodyFocus = await focusOf();
+    check(
+      bodyFocus.tag === "BUTTON" && bodyFocus.text === "Allow once" && bodyFocus.inMsg,
+      `panel: a permission card takes focus to Allow once (${JSON.stringify(bodyFocus)})`,
+    );
+
+    // 2. Mid-typing: a card landing must not pull the keystrokes out of the composer.
+    await panel.click("#input");
+    await panel.type("#input", "find the contact email");
+    await askOnce(90004);
+    await cardsAtLeast(4);
+    const typingFocus = await focusOf();
+    check(typingFocus.id === "input", `panel: a card appearing mid-typing keeps focus in the composer (${JSON.stringify(typingFocus)})`);
+
+    // 3. Mid-slash-menu: the open list lives inside the composer, so the same rule
+    // holds. It is reachable in this suite because the config seed carries prompts.
+    await seed({ prompts: [{ id: "p1", command: "summarize", text: "Summarize this page in 3 bullets." }] });
+    await panel.fill("#input", "");
+    await panel.type("#input", "/sum");
+    await panel.waitForSelector("#slash-menu .slash-item", { timeout: 4000 }).catch(() => {});
+    await askOnce(90005);
+    await cardsAtLeast(5);
+    const slashFocus = await focusOf();
+    const slashOpen = await panel.evaluate(() => !document.getElementById("slash-menu").hidden);
+    check(
+      slashFocus.id === "input" && slashOpen,
+      `panel: a card during an open slash menu leaves the composer focused (${JSON.stringify(slashFocus)}, menu open ${slashOpen})`,
+    );
+
+    // 4. A choice removes the buttons, so the tab order needs a landing point.
+    const notesBefore = await panel.$$eval(".perm-card .muted-note", (els) => els.length);
+    // The keyboard path is the faithful one: focus lands on the card's button
+    // (inside #messages) and Enter fires it. A mouse click on a card row sitting
+    // under the composer fails Playwright's actionability check, so focus is put
+    // on the button directly, which is where a Tab-to-Enter user puts it.
+    const choiceBtn = panel.locator(".perm-card").last().locator('button[data-choice="once"]');
+    await choiceBtn.focus().catch(() => {});
+    await panel.keyboard.press("Enter").catch(() => {});
+    await panel
+      .waitForFunction((n) => document.querySelectorAll(".perm-card .muted-note").length > n, notesBefore, { timeout: 5000 })
+      .catch(() => {});
+    const noteFocus = await focusOf();
+    check(
+      noteFocus.note && noteFocus.tab === "-1",
+      `panel: after a choice focus lands on the note (${JSON.stringify(noteFocus)})`,
+    );
+
+    // 5. Threat 11: two save-workflow cards can be open at once — the panel
+    // re-offers an unsaved recording when it opens, and a fresh Stop makes the
+    // second. The name field sits inside each card, so its id must be per card:
+    // getElementById takes the first match, which is the other card's field.
+    // Recording starts from the panel's own Record button: the banner is the
+    // panel's own state, so a start fired from the options page leaves it hidden.
+    await optPage.evaluate(([k, v]) => chrome.storage.session.set({ [k]: v }), [
+      SESSION_PENDING_WF_KEY,
+      { steps: [{ action: "click", description: "Click Search" }], startUrl: `${BASE1}/page` },
+    ]);
+    const wfPanel = await context.newPage();
+    await wfPanel.goto(`chrome-extension://${extId}/src/sidepanel/sidepanel.html`, { waitUntil: "load" });
+    await wfPanel.waitForTimeout(500);
+    // The suite's last scenario navigated testPage away, and recording watches the
+    // active tab, so the search box goes back and comes frontmost before starting.
+    await testPage.goto(`${BASE1}/page`, { waitUntil: "load" });
+    await testPage.bringToFront();
+    await wfPanel.click("#record-btn").catch(() => {});
+    await wfPanel.waitForTimeout(300); // let the content script arm
+    await testPage.click("#q").catch(() => {});
+    await testPage.type("#q", "cats").catch(() => {});
+    await testPage.click("#go").catch(() => {});
+    await testPage.waitForTimeout(400);
+    await wfPanel.waitForSelector("#rec-banner #rec-stop", { timeout: 5000 }).catch(() => {});
+    await wfPanel.click("#rec-stop").catch(() => {});
+    await wfPanel
+      .waitForFunction(() => document.querySelectorAll("#messages .perm-card").length >= 2, null, { timeout: 5000 })
+      .catch(() => {});
+    const ids = await wfPanel.evaluate(() => {
+      const list = [...document.querySelectorAll("#messages [id]")].map((el) => el.id);
+      return {
+        cards: document.querySelectorAll("#messages .perm-card").length,
+        banner: (document.getElementById("rec-banner").textContent || "").replace(/\s+/g, " ").trim(),
+        list,
+        dupes: list.filter((id, i) => list.indexOf(id) !== i),
+      };
+    });
+    check(
+      ids.cards >= 2 && ids.dupes.length === 0,
+      `panel: no duplicate id in #messages (${JSON.stringify(ids)})`,
+    );
+    await wfPanel.close();
+
     await panel.close();
   } finally {
     await context.close();

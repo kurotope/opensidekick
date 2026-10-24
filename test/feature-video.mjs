@@ -366,9 +366,9 @@ async function main() {
       await pair.page.click("#go");
       await sleep(1200); // steps tick up on the banner
       await pair.panel.click("#rec-stop");
-      await pair.panel.waitForSelector("#wf-name", { timeout: 10000 });
+      await pair.panel.waitForSelector(".wf-name-input", { timeout: 10000 });
       await sleep(900);
-      await pair.panel.type("#wf-name", "Library search", { delay: 30 });
+      await pair.panel.type(".wf-name-input", "Library search", { delay: 30 });
       await sleep(400);
       await pair.panel.click('button[data-save="1"]');
       await sleep(1000);

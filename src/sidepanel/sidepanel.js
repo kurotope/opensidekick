@@ -925,6 +925,35 @@ function addNote(text, icon, action) {
   scroll();
 }
 
+// -------------------------------------------------------------------------
+// Card focus. A card lands at the end of the transcript, and grabbing focus is
+// the rude thing to do: mid-sentence, or mid-slash-menu, the keystrokes the user
+// is typing would land on a button. So focus is taken only when nothing else has
+// it (document.body) or focus already sits inside #messages, where the card is.
+// One rule serves both moments — the card's primary button on insertion, and the
+// note that replaces the buttons after a choice, which needs a landing point for
+// the tab order. The note carries tabindex="-1" as an attribute only: the shared
+// :focus-visible ring in ui.css draws it, so no new CSS is added.
+// -------------------------------------------------------------------------
+function primaryButton(card) {
+  return card.querySelector("button.primary") || card.querySelector("button");
+}
+
+function choiceNote(text) {
+  const note = document.createElement("p");
+  note.className = "muted-note";
+  note.tabIndex = -1;
+  note.textContent = text; // user text goes through textContent, never innerHTML
+  return note;
+}
+
+function focusIfTranscript(target) {
+  if (!target) return;
+  const active = document.activeElement;
+  if (active !== document.body && !els.messages.contains(active)) return;
+  target.focus();
+}
+
 function showPlan(req) {
   sealLog();
   const plan = req.plan || {};
@@ -946,11 +975,14 @@ function showPlan(req) {
       el.querySelectorAll("button").forEach((b) => (b.disabled = true));
       const approved = btn.dataset.approved === "1";
       send({ type: MSG.PLAN_RESPONSE, id: req.id, approved });
-      el.querySelector(".perm-buttons").outerHTML = `<p class="muted-note">${approved ? "Approved." : "Declined."}</p>`;
+      const note = choiceNote(approved ? "Approved." : "Declined.");
+      el.querySelector(".perm-buttons").replaceWith(note);
+      focusIfTranscript(note);
     }),
   );
   els.messages.appendChild(el);
   scroll();
+  focusIfTranscript(primaryButton(el));
 }
 
 function showPermission(req) {
@@ -989,12 +1021,14 @@ function showPermission(req) {
       el.querySelectorAll("button").forEach((b) => (b.disabled = true));
       const choice = btn.dataset.choice;
       send({ type: MSG.PERMISSION_RESPONSE, id: req.id, choice });
-      el.querySelector(".perm-buttons").outerHTML =
-        `<p class="muted-note">${choice === "decline" ? "Declined." : "Allowed."}</p>`;
+      const note = choiceNote(choice === "decline" ? "Declined." : "Allowed.");
+      el.querySelector(".perm-buttons").replaceWith(note);
+      focusIfTranscript(note);
     }),
   );
   els.messages.appendChild(el);
   scroll();
+  focusIfTranscript(primaryButton(el));
 }
 
 // -------------------------------------------------------------------------
@@ -1283,18 +1317,27 @@ function showSaveWorkflow(steps, startUrl) {
   const el = document.createElement("div");
   el.className = "perm-card";
   const list = steps.map((s) => `<li>${escapeHtml(s.description || String(s))}</li>`).join("");
+  // Two of these cards can be open at once: the panel re-offers an unsaved
+  // recording when it opens, and a fresh Stop makes another. The name field is
+  // inside a card, so its id has to be per card — getElementById takes the first
+  // match, which is the other card's field. The value is read from this card's
+  // node, never through an id selector, so a shared id cannot misroute a name.
+  const nameId = `wf-name-${crypto.randomUUID()}`;
   el.innerHTML = `
     <h3>Save this workflow?</h3>
     <ol class="plan-steps">${list}</ol>
-    <input id="wf-name" class="wf-name-input" placeholder="Name (e.g. Book a meeting room)" />
+    <input id="${nameId}" class="wf-name-input" placeholder="Name (e.g. Book a meeting room)" />
     <div class="perm-buttons"><button class="primary" data-save="1">Save</button><button data-save="0">Discard</button></div>`;
+  const nameField = el.querySelector(".wf-name-input");
   el.querySelectorAll("button").forEach((btn) =>
     btn.addEventListener("click", async () => {
       chrome.storage.session.remove(SESSION_PENDING_WF_KEY).catch(() => {});
       if (btn.dataset.save === "1") {
-        const name = (el.querySelector("#wf-name").value || "").trim() || "Untitled workflow";
+        const name = (nameField.value || "").trim() || "Untitled workflow";
         await saveWorkflow({ id: crypto.randomUUID(), name, startUrl, steps });
-        el.querySelector(".perm-buttons").outerHTML = `<p class="muted-note">Saved “${escapeHtml(name)}”. Replay it from the Saved workflows menu.</p>`;
+        const note = choiceNote(`Saved “${name}”. Replay it from the Saved workflows menu.`);
+        el.querySelector(".perm-buttons").replaceWith(note);
+        focusIfTranscript(note);
       } else {
         el.remove();
       }
@@ -1302,6 +1345,7 @@ function showSaveWorkflow(steps, startUrl) {
   );
   els.messages.appendChild(el);
   scroll();
+  focusIfTranscript(primaryButton(el));
 }
 
 // If a recording was stopped but never saved/discarded (e.g. the panel closed),
