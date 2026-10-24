@@ -1374,6 +1374,13 @@ async function main() {
     const panel = await context.newPage();
     await panel.goto(`chrome-extension://${extId}/src/sidepanel/sidepanel.html`, { waitUntil: "load" });
     await panel.waitForTimeout(400); // let the panel's async prompt-load finish
+    // The composer's name cannot be its placeholder: updateConfiguredUI rewrites
+    // the placeholder for the unconfigured state, so the name is captured here
+    // (configured) and checked with the gate panel at the end of the suite.
+    const composerCfg = await panel.evaluate(() => {
+      const el = document.getElementById("input");
+      return { name: el.getAttribute("aria-label") || "", placeholder: el.placeholder };
+    });
     await panel.click("#input");
     await panel.type("#input", "/sum");
     await panel.waitForSelector("#slash-menu .slash-item", { timeout: 4000 });
@@ -2623,6 +2630,15 @@ async function main() {
     const chipHidden = await gatePanel.$eval("#model-line", (el) => el.hidden).catch(() => false);
     check(chipHidden, "gate: the model chip is hidden while no model is configured");
     check(/settings/i.test(placeholder), `gate: composer prompts to add a model (placeholder "${placeholder}")`);
+    // The composer's name is asserted in both states: it was captured on the
+    // configured panel in the slash scenario, and updateConfiguredUI rewrote
+    // only the placeholder here — so a name that lived on the placeholder fails.
+    const gateName = await gatePanel.$eval("#input", (el) => el.getAttribute("aria-label") || "").catch(() => "");
+    check(
+      composerCfg.name.trim() !== "" && gateName.trim() !== "" && composerCfg.placeholder.startsWith("Ask about"),
+      `composer: #input has an accessible name (configured "${composerCfg.name}", unconfigured "${gateName}", placeholder "${composerCfg.placeholder}")`,
+    );
+
     // The unconfigured run above left a chat in the worker, which the panel
     // restores over the empty state; start a fresh one to see the gate itself.
     await gatePanel.click("#new-chat");
