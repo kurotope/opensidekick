@@ -1223,6 +1223,77 @@ body {
   margin-left: auto;
 }
 
+/* Pending attachments: a strip of thumbnails above the field, each with its own
+   remove. The strip is hidden until something is attached, so the composer
+   stays quiet for the text-only case that is most of the traffic. */
+.attach-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 8px 12px 0;
+}
+.att-chip {
+  position: relative;
+  width: 56px;
+  height: 56px;
+}
+.att-thumb {
+  display: block;
+  /* The chip owns the square, so 56 px is written once here and nowhere else. */
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  border-radius: var(--os-r);
+  border: 1px solid var(--os-line-strong);
+  background: var(--os-sunken);
+}
+.att-remove {
+  /* The panel's documented rule is a touch target of at least 32 px. The old
+     target was 20 px and hung -6px outside the chip, so it was under the rule and
+     clipped by the strip's box. Here the target sits inside the chip's top right
+     corner: 32 px, the outer corner radius follows the thumb, the fill is the
+     raised surface so the × stays readable over any thumbnail. */
+  position: absolute;
+  top: 0;
+  right: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--os-8);
+  height: var(--os-8);
+  padding: 0;
+  border: 1px solid var(--os-line-2);
+  border-radius: 0 var(--os-r) 0 var(--os-5);
+  background: var(--os-raised);
+  color: var(--os-ink);
+  font-size: var(--os-fs-16);
+  cursor: pointer;
+  opacity: 0.86;
+}
+.att-remove:hover {
+  background: var(--os-surface);
+  color: var(--os-ink);
+  opacity: 1;
+}
+/* The same image inside the user's bubble: full width up to the bubble, not a
+   fixed square, so a screenshot is readable where it was sent. */
+.msg.user .att-thumb.sent {
+  width: auto;
+  height: auto;
+  max-width: 100%;
+  max-height: 200px;
+  margin-top: 6px;
+  border: 1px solid var(--os-line);
+}
+.attach-btn {
+  flex: 0 0 auto;
+  margin-left: -4px;
+}
+.attach-btn .ic {
+  width: 16px;
+  height: 16px;
+}
+
 .send-btn {
   width: 32px;
   height: 32px;
@@ -1234,9 +1305,14 @@ body {
   width: 16px;
   height: 16px;
 }
-/* Nothing typed yet: Send goes quiet. Visual only; it is never disabled. */
-.composer-field:has(textarea:placeholder-shown) .send-btn,
-.composer-field:has(textarea:placeholder-shown) .send-btn:hover:not(:disabled) {
+/* Nothing typed yet: Send goes quiet. Visual only; it is never disabled. The
+   :not() is the load-bearing part — a paste leaves the textarea empty, and this
+   rule is specificity (0,4,1), one step above the `.btn` accent fill the button
+   already carries, so without the :not() the quiet fill wins and the "there is
+   something to send" cue never renders. Image attached, nothing typed: `.btn`
+   paints its own accent, and that is the cue. */
+.composer-field:has(textarea:placeholder-shown):not(.has-attachments) .send-btn,
+.composer-field:has(textarea:placeholder-shown):not(.has-attachments) .send-btn:hover:not(:disabled) {
   background: var(--os-sunken);
   color: var(--os-muted);
 }

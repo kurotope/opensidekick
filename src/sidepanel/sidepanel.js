@@ -14,6 +14,7 @@ import {
   TRIMMED_NOTE,
 } from "../common/constants.js";
 import { matchPrompts, isSlashQuery } from "../common/prompts.js";
+import { classifyFile, targetSize, acceptImage, sniffImageType, sourceAllowed, taskFor, IMAGE_TYPES, ATTACH_NOTES } from "../common/attachments.js";
 import { escapeHtml } from "../common/escape.js";
 import { markdownToHtml, createStreamingRenderer, renderTick, CODE_CLASS, setHighlighter } from "../common/markdown.js";
 import { relativeTime } from "../background/sessions.js";
@@ -36,6 +37,10 @@ const els = {
   notConfigured: document.getElementById("not-configured"),
   input: document.getElementById("input"),
   composer: document.getElementById("composer"),
+  composerField: document.querySelector(".composer-field"),
+  attach: document.getElementById("attach-btn"),
+  attachInput: document.getElementById("attach-input"),
+  attachStrip: document.getElementById("attach-strip"),
   send: document.getElementById("send-btn"),
   stop: document.getElementById("stop-btn"),
   newChat: document.getElementById("new-chat"),
@@ -201,6 +206,29 @@ async function init() {
     scroll();
   });
   els.composer.addEventListener("submit", onSubmit);
+  // The picker's accept list is the same set the rules use, so the HTML cannot drift from the module.
+  els.attachInput.accept = [...IMAGE_TYPES].join(",");
+  els.attach.addEventListener("click", () => els.attachInput.click());
+  els.attachInput.addEventListener("change", () => {
+    addFiles(els.attachInput.files);
+    els.attachInput.value = ""; // so picking the same file twice works
+  });
+  // Paste and drop move a screenshot from the clipboard without leaving the keyboard.
+  els.input.addEventListener("paste", (e) => {
+    // Only a clipboard carrying files is intercepted; a text-only paste must reach the textarea unchanged.
+    const files = e.clipboardData && e.clipboardData.files;
+    if (!files || !files.length) return;
+    e.preventDefault();
+    addFiles(files);
+  });
+  // The drop guard is whole-panel — dropping on the message list is the natural gesture — and
+  // preventDefault is unconditional: a dropped file with no handler navigates the panel to it.
+  document.addEventListener("dragover", (e) => e.preventDefault());
+  document.addEventListener("drop", (e) => {
+    e.preventDefault();
+    const files = e.dataTransfer && e.dataTransfer.files;
+    if (files && files.length) addFiles(files);
+  });
   els.input.addEventListener("keydown", onInputKeydown);
   els.input.addEventListener("input", () => {
     // Editing a recalled prompt ends history browsing (the edited text stays).
@@ -491,7 +519,8 @@ async function setSiteRule(origin, rule) {
 async function onSubmit(e) {
   e.preventDefault();
   const text = els.input.value.trim();
-  if (!text || running) return;
+  const images = pendingImages.slice();
+  if ((!text && !images.length) || running) return;
   if (!configured) {
     // First-run gate: no model yet — send them to Settings instead of failing.
     els.empty.hidden = false;
@@ -500,15 +529,22 @@ async function onSubmit(e) {
     return;
   }
   els.empty.hidden = true;
-  rememberPrompt(text);
+  if (text) rememberPrompt(text);
   exitHistory();
-  // The user bubble is rendered from the worker's `user_echo` event so that
-  // runs triggered by anything (composer, context menu) show consistently.
+  // An image with no words needs a task line — Anthropic rejects an empty text block — and it
+  // lives in the pure module, so panel and worker say the same thing.
+  const task = taskFor(text, images);
+  // The user bubble is rendered from the worker's `user_echo` so runs from any trigger show
+  // consistently; the thumbnails come from this panel's own copy, so the worker never
+  // echoes megabytes of base64 back.
+  lastSentImages = images;
   els.input.value = "";
+  pendingImages = [];
+  renderAttachStrip();
   autoGrow();
   refreshContextHint();
   const wasPending = newChatPending;
-  const reply = send({ type: MSG.RUN_TASK, task: text, newChat: wasPending });
+  const reply = send({ type: MSG.RUN_TASK, task, images, newChat: wasPending });
   newChatPending = false;
   setRunning(true);
   // Stop, New chat, then a quick send can land while the stopped run is still
@@ -519,10 +555,126 @@ async function onSubmit(e) {
       els.input.value = text;
       autoGrow();
     }
+    // A send that never started must not throw away the image the user just pasted.
+    if (!pendingImages.length) {
+      pendingImages = images;
+      renderAttachStrip();
+    }
+    lastSentImages = [];
     newChatPending = wasPending;
     els.empty.hidden = !!els.messages.querySelector(".msg");
     setRunning(false);
   }
+}
+
+// --- Composer attachments -----------------------------------------------------
+
+// Images waiting to be sent, as { mediaType, data } — the shape the screenshot tool produces.
+let pendingImages = [];
+let lastSentImages = [];
+
+// The strip is rebuilt from pendingImages on every change: a thumbnail and its remove button each.
+function renderAttachStrip() {
+  els.attachStrip.innerHTML = "";
+  for (const [i, img] of pendingImages.entries()) {
+    const chip = document.createElement("div");
+    chip.className = "att-chip";
+    const thumb = document.createElement("img");
+    thumb.className = "att-thumb";
+    thumb.src = `data:${img.mediaType};base64,${img.data}`;
+    thumb.alt = `Attachment ${i + 1}`;
+    const rm = document.createElement("button");
+    rm.type = "button";
+    rm.className = "att-remove";
+    rm.setAttribute("aria-label", `Remove attachment ${i + 1}`);
+    rm.textContent = "×";
+    rm.addEventListener("click", () => {
+      pendingImages.splice(i, 1);
+      renderAttachStrip();
+    });
+    chip.append(thumb, rm);
+    els.attachStrip.appendChild(chip);
+  }
+  els.attachStrip.hidden = pendingImages.length === 0;
+  // Send looks live when there is something to send, even with no text typed.
+  els.composerField.classList.toggle("has-attachments", pendingImages.length > 0);
+}
+
+// One entry point for paste, drop and the picker: all three get the same checks and note wording.
+async function addFiles(files) {
+  for (const f of Array.from(files || [])) {
+    const r = classifyFile(f, pendingImages.length);
+    if (!r.ok) {
+      addNote(ATTACH_NOTES[r.reason], "dot");
+      continue;
+    }
+    const img = await fileToImage(f);
+    if (!img.ok) {
+      addNote(ATTACH_NOTES[img.reason], "dot");
+      continue;
+    }
+    // The worker's base64 gate applied here too, so a payload past the cap is refused before
+    // it reaches the strip and the note matches the worker's.
+    const a = acceptImage(img);
+    if (!a.ok) {
+      addNote(ATTACH_NOTES[a.reason], "dot");
+      continue;
+    }
+    // The canonical type is the one acceptImage approved, so strip, send and provider carry one string.
+    pendingImages.push({ mediaType: a.mediaType, data: img.data });
+    renderAttachStrip();
+    els.input.focus();
+  }
+}
+
+// Encode a file to { ok, mediaType, data } (or { ok: false, reason }), downscaled to MAX_LONG_EDGE.
+// A file already small enough keeps its own bytes: re-encoding a lossless PNG costs quality.
+async function fileToImage(file) {
+  // The signature is the type, not file.type: a JPEG renamed photo.png must reach the provider
+  // as image/jpeg, and bytes that are none of the four are not an image.
+  const head = new Uint8Array(await file.slice(0, 12).arrayBuffer());
+  const sniffed = sniffImageType(head);
+  if (!sniffed) return { ok: false, reason: "type" };
+  let bitmap;
+  try {
+    // createImageBitmap takes the File directly, and is the gate that refuses a
+    // corrupt file: a decode that fails throws here.
+    bitmap = await createImageBitmap(file);
+  } catch {
+    return { ok: false, reason: "type" };
+  }
+  try {
+    // The area is measured on the decoded bitmap, and this gate runs before any
+    // canvas is made, so an over-cap source is refused without a re-encode.
+    const area = sourceAllowed(bitmap.width, bitmap.height);
+    if (!area.ok) return { ok: false, reason: area.reason };
+    const { width, height } = targetSize(bitmap.width, bitmap.height);
+    if (width === bitmap.width && height === bitmap.height) {
+      const dataUrl = await readAsDataUrl(file);
+      return { ok: true, mediaType: sniffed, data: dataUrl.slice(dataUrl.indexOf(",") + 1) };
+    }
+    const canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+    canvas.getContext("2d").drawImage(bitmap, 0, 0, width, height);
+    // PNG stays PNG (GIF becomes PNG, first frame lossless); JPEG and WebP re-encode as JPEG,
+    // which every provider reads.
+    const outType = sniffed === "image/jpeg" || sniffed === "image/webp" ? "image/jpeg" : "image/png";
+    const dataUrl = canvas.toDataURL(outType, 0.92);
+    return { ok: true, mediaType: outType, data: dataUrl.slice(dataUrl.indexOf(",") + 1) };
+  } finally {
+    // The decoded bitmap is a native allocation of megabytes; give it back as soon as the pixels are out.
+    if (bitmap.close) bitmap.close();
+  }
+}
+
+function readAsDataUrl(file) {
+  return new Promise((res, rej) => {
+    const fr = new FileReader();
+    fr.onload = () => res(String(fr.result));
+    fr.onerror = rej;
+    fr.readAsDataURL(file);
+  });
 }
 
 function newChat() {
@@ -531,6 +683,10 @@ function newChat() {
   clearTranscript();
   els.empty.hidden = false;
   newChatPending = true;
+  // Attachments belong to the chat being cleared, not to the next one.
+  pendingImages = [];
+  lastSentImages = [];
+  renderAttachStrip();
 }
 
 function clearTranscript() {
@@ -542,12 +698,15 @@ function clearTranscript() {
   els.jumpLatest.hidden = true;
 }
 
-// The worker dropped the live chat (Clear all, or the open chat was deleted).
-// The next send continues the worker's fresh chat, so nothing is armed here.
+// The worker dropped the live chat (Clear all, or the open chat was deleted): the strip goes
+// empty with the transcript, so an image pasted for a deleted chat cannot ride into the next send.
 function resetChatView() {
   clearTranscript();
   els.empty.hidden = false;
   newChatPending = false;
+  pendingImages = [];
+  lastSentImages = [];
+  renderAttachStrip();
 }
 
 // -------------------------------------------------------------------------
@@ -563,7 +722,8 @@ function handleEvent(ev) {
       break;
     case "user_echo":
       els.empty.hidden = true;
-      addUserMessage(ev.text);
+      addUserMessage(ev.text, lastSentImages);
+      lastSentImages = [];
       break;
     case "assistant_start":
       startAssistant();
@@ -635,11 +795,18 @@ function setRunning(v) {
 // -------------------------------------------------------------------------
 // Rendering
 // -------------------------------------------------------------------------
-function addUserMessage(text) {
+function addUserMessage(text, images) {
   sealLog();
   const el = document.createElement("div");
   el.className = "msg user";
   el.textContent = text;
+  for (const img of images || []) {
+    const thumb = document.createElement("img");
+    thumb.className = "att-thumb sent";
+    thumb.src = `data:${img.mediaType};base64,${img.data}`;
+    thumb.alt = "Attached image";
+    el.appendChild(thumb);
+  }
   els.messages.appendChild(el);
   scroll();
 }

@@ -3,6 +3,7 @@
 // provider layer converts them to the right wire format.
 
 import { MSG } from "../common/constants.js";
+import { IMAGE_TYPES, acceptImage } from "../common/attachments.js";
 import { readConsole, readNetwork } from "./cdp.js";
 
 export const TOOL_DEFS = [
@@ -476,8 +477,9 @@ async function screenshot(ctx) {
 }
 
 const IMAGE_URL_RE = /^https?:\/\/[^?#]+\.(jpe?g|png|gif|webp|bmp|avif)(\?[^#]*)?(#.*)?$/i;
-// Model-accepted image media types; other formats fall back to a screenshot.
-const MODEL_IMAGE_TYPES = new Set(["image/jpeg", "image/png", "image/gif", "image/webp"]);
+// The accepted media types (IMAGE_TYPES) and the base64 size cap
+// (MAX_BASE64_CHARS) live in common/attachments.js, shared with the composer, so
+// the two paths cannot drift apart.
 
 // When a tab points straight at an image, fetch its bytes and return
 // { mediaType, data } for direct attachment. Returns null (→ fall back to a
@@ -489,16 +491,18 @@ async function fetchDirectImage(url) {
     if (!res.ok) return null;
     const blob = await res.blob();
     const mediaType = (blob.type || "").toLowerCase();
-    if (!MODEL_IMAGE_TYPES.has(mediaType)) return null;
-    // Guard against very large payloads (data URI base64 ≈ 1.37× bytes).
-    if (blob.size > 12 * 1024 * 1024) return null;
+    if (!IMAGE_TYPES.has(mediaType)) return null;
     const buf = new Uint8Array(await blob.arrayBuffer());
     let binary = "";
     const chunk = 0x8000;
     for (let i = 0; i < buf.length; i += chunk) {
       binary += String.fromCharCode.apply(null, buf.subarray(i, i + chunk));
     }
-    return { mediaType, data: btoa(binary) };
+    const data = btoa(binary);
+    // The same size rule as every other image, so the cap lives in one place: a
+    // payload past MAX_BASE64_CHARS is refused here and the tool falls back to a
+    // screenshot.
+    return acceptImage({ mediaType, data }).ok ? { mediaType, data } : null;
   } catch {
     return null;
   }

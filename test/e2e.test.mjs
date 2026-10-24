@@ -28,12 +28,20 @@ import {
   HISTORY_NOTICE,
   TRIMMED_NOTE,
 } from "../src/common/constants.js";
+import { MAX_BASE64_CHARS, IMAGE_ONLY_TASK } from "../src/common/attachments.js";
 
 const EXT_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const IMG_PNG = fs.readFileSync(path.join(EXT_DIR, "icons/icon16.png")); // a real, tiny PNG
+const IMG_B64 = IMG_PNG.toString("base64"); // the same PNG as a wire payload
+// Bytes-wise past MAX_BASE64_CHARS, so the tool path's size cap has something to refuse; the cap is checked on the bytes, before anything reads them.
+const BIG_PNG = Buffer.alloc(4 * 1024 * 1024, 0x41);
 let failures = 0;
 let sawImage = false; // set by the mock when a request carries an image part
 let lastImageUrl = ""; // the most recent image data URI the mock received
+let imageRequests = 0; // how many requests carried an image, for the composer scenario
+let lastImageDims = { w: 0, h: 0 }; // PNG dimensions the mock decoded from the IHDR chunk
+let lastImageBytes = 0; // decoded byte length of the image part, for the keep-bytes check
+let apiRequests = 0; // every chat/completions request the mock answered, for "no run started"
 let probeRequests = []; // { model, kind } per testModel probe the mock answered
 let probeDelayMs = 0; // holds the tools probe open, so a run can be observed/cancelled
 let lastSystem = ""; // the system prompt of the most recent agent (non-probe) request
@@ -42,6 +50,67 @@ const check = (cond, msg) => {
   console.log((cond ? "ok  : " : "FAIL: ") + msg);
   if (!cond) failures++;
 };
+
+// Panel helpers shared by every scenario that drives the real composer: paste a canvas image, wait for a run, read the last answer, open History.
+// `type` is the bytes, `label` the type the File declares; equal by default, apart is the label lie.
+const pasteImage = (pg, w, h, type = "image/png", label = type) =>
+  pg.evaluate(async ([w, h, type, label]) => {
+    const c = document.createElement("canvas");
+    c.width = w;
+    c.height = h;
+    const g = c.getContext("2d");
+    g.fillStyle = "#3b82f6";
+    g.fillRect(0, 0, w, h);
+    const blob = await new Promise((r) => c.toBlob(r, type));
+    const dt = new DataTransfer();
+    dt.items.add(new File([blob], "shot.png", { type: label }));
+    const ta = document.getElementById("input");
+    ta.focus();
+    ta.dispatchEvent(new ClipboardEvent("paste", { clipboardData: dt, bubbles: true, cancelable: true }));
+    return blob.size;
+  }, [w, h, type, label]);
+const panelIdle = async (pg, prevAnswers) => {
+  for (let i = 0; i < 120; i++) {
+    const idle = await pg.$eval("#send-btn", (el) => !el.hidden).catch(() => false);
+    const answers = await pg.$$eval(".msg.assistant", (n) => n.length).catch(() => 0);
+    if (idle && answers > prevAnswers) return answers;
+    await new Promise((r) => setTimeout(r, 200));
+  }
+  return -1;
+};
+const lastAssistant = (pg) => pg.$$eval(".msg.assistant", (els) => (els.length ? els[els.length - 1].textContent : "")).catch(() => "");
+const assistantCount = (pg) => pg.$$eval(".msg.assistant", (n) => n.length).catch(() => 0);
+// The panel back to idle when the run ends in an error: no assistant message is added, so the send button returning is the only end signal.
+const panelSettled = async (pg) => {
+  await pg.waitForTimeout(400);
+  for (let i = 0; i < 60; i++) {
+    if (await pg.$eval("#send-btn", (el) => !el.hidden).catch(() => false)) return true;
+    await new Promise((r) => setTimeout(r, 200));
+  }
+  return false;
+};
+// Send's fill read against theme tokens read out of the page, so the assertion names which fill won instead of a hardcoded rgb().
+const sendCue = (pg) =>
+  pg.evaluate(() => {
+    const root = getComputedStyle(document.documentElement);
+    const toRgb = (v) => {
+      let h = String(v).trim().replace(/^#/, "");
+      if (h.length === 3) h = h.split("").map((c) => c + c).join("");
+      const n = parseInt(h, 16);
+      return `rgb(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255})`;
+    };
+    const token = (name) => toRgb(root.getPropertyValue(name));
+    return {
+      accent: token("--os-accent"),
+      sunken: token("--os-sunken"),
+      send: getComputedStyle(document.getElementById("send-btn")).backgroundColor,
+    };
+  });
+const openHistory = async (pg) => {
+  await pg.click("#history-btn");
+  await pg.waitForSelector("#hist-menu:not([hidden]) .hist-body > *", { timeout: 5000 });
+};
+const histRow = (id) => `#hist-menu li.hist-item[data-id="${id}"]`;
 
 const TEST_PAGE = `<!doctype html><html><head><meta charset="utf-8"><title>Test Search</title></head>
 <body>
@@ -128,7 +197,12 @@ const MD_ANSWER =
 
 // --- Mock model: scripts multi-step agentic tasks over the tool protocol. ---
 function decide(messages) {
-  const firstUser = (messages.find((m) => m.role === "user")?.content || "").toString().toLowerCase();
+  // A user turn with an attachment arrives as an array of content parts, so the text is read out of them before any scenario can key on it.
+  const textOf = (m) =>
+    Array.isArray(m.content)
+      ? m.content.filter((p) => p && p.type === "text").map((p) => p.text).join(" ")
+      : String(m.content || "");
+  const firstUser = textOf(messages.find((m) => m.role === "user") || { content: "" }).toLowerCase();
   const toolMsgs = messages.filter((m) => m.role === "tool");
   const n = toolMsgs.length;
   const parsed = toolMsgs.map((m) => { try { return JSON.parse(m.content); } catch { return {}; } });
@@ -137,7 +211,8 @@ function decide(messages) {
 
   // Model identity: the agent appends which model it is to the system prompt.
   // Keyed on the LATEST user turn, since this is asked mid-conversation.
-  const lastUser = ([...messages].reverse().find((m) => m.role === "user" && typeof m.content === "string")?.content || "").toLowerCase();
+  const lastUserMsg = [...messages].reverse().find((m) => m.role === "user");
+  const lastUser = textOf(lastUserMsg || { content: "" }).toLowerCase();
   if (/what model are you/.test(lastUser)) {
     const system = messages.find((m) => m.role === "system")?.content || "";
     return { kind: "text", text: system.includes('running as the model "mock-model"') ? "I am mock-model via Mock." : "I don't know which model I am." };
@@ -147,6 +222,16 @@ function decide(messages) {
   // be poked mid-run (the model-switch note must wait for the run to end).
   if (/hold your reply/.test(lastUser)) return { kind: "text", text: "Holding on... done holding.", stallMs: 2500 };
 
+  // Composer attachment: the mock answers only from the image in the request, so the reply proves the paste reached the provider in the same turn.
+  if (/attached image/.test(lastUser)) {
+    const hasImage = messages.some((m) => Array.isArray(m.content) && m.content.some((p) => p && p.type === "image_url"));
+    return { kind: "text", text: hasImage ? "image_seen=yes" : "image_seen=no" };
+  }
+  // A provider 400 on a turn carrying the user's own attachment, so the vision warning fires for a paste, not only for a captured screenshot.
+  if (/vision refusal/.test(lastUser)) {
+    const hasImage = messages.some((m) => Array.isArray(m.content) && m.content.some((p) => p && p.type === "image_url"));
+    return { kind: "http400", message: hasImage ? "the model declined the image in this request" : "declined with no image" };
+  }
   if (/format the answer as markdown/.test(lastUser)) return { kind: "text", text: MD_ANSWER };
   // The same answer, streamed, so the streamed DOM can be compared with the one-shot DOM.
   if (/stream markdown/.test(lastUser)) return { kind: "text", text: MD_ANSWER, stallMs: 1200 };
@@ -356,6 +441,10 @@ function startServer() {
       res.writeHead(200, { "content-type": "image/png", "access-control-allow-origin": "*" });
       return res.end(IMG_PNG);
     }
+    if (req.url === "/big.png") {
+      res.writeHead(200, { "content-type": "image/png", "content-length": BIG_PNG.length, "access-control-allow-origin": "*" });
+      return res.end(BIG_PNG);
+    }
     if (req.url.endsWith("/models")) {
       res.writeHead(200, { "content-type": "application/json", "access-control-allow-origin": "*" });
       return res.end(JSON.stringify({ data: [{ id: "mock-model" }] }));
@@ -404,14 +493,24 @@ function startServer() {
           bodyObj = JSON.parse(body);
         } catch {}
         const messages = bodyObj.messages || [];
+        apiRequests++;
+        let reqImages = 0;
         for (const m of messages) {
           if (Array.isArray(m.content))
             for (const p of m.content)
               if (p && p.type === "image_url") {
                 sawImage = true;
+                reqImages++;
                 lastImageUrl = (p.image_url && p.image_url.url) || "";
+                // Decoding the part proves two things: byte length shows a small file reached the wire as its own bytes, and a PNG's IHDR carries the sender's dimensions.
+                const buf = Buffer.from((lastImageUrl.split(",")[1] || ""), "base64");
+                lastImageBytes = buf.length;
+                if (buf.length > 24 && buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) {
+                  lastImageDims = { w: buf.readUInt32BE(16), h: buf.readUInt32BE(20) };
+                }
               }
         }
+        if (reqImages) imageRequests++;
         // A model-suitability probe: answer it as a fully capable model would.
         // Checked before the no-tools branch below — the text and vision probes
         // carry no tools either.
@@ -441,6 +540,10 @@ function startServer() {
           );
         }
         const d = decide(messages);
+        if (d.kind === "http400") {
+          res.writeHead(400, { "content-type": "application/json", "access-control-allow-origin": "*" });
+          return res.end(JSON.stringify({ error: { message: d.message } }));
+        }
         if (d.kind === "text" && d.stallMs) sseTextStalled(res, d.text, d.stallMs);
         else if (d.kind === "text") sseText(res, d.text);
         else sseToolCall(res, "call_" + Date.now(), d.name, d.args);
@@ -522,6 +625,70 @@ async function main() {
       ([key, cfg]) => chrome.storage.local.set({ [key]: cfg }),
       [STORAGE_KEY, config],
     );
+
+    // Send through the real composer and wait for the run: the agent targets the active content tab, so the test page is pulled to the front first.
+    const panelSend = async (pg, text, prevAnswers) => {
+      await pg.fill("#input", text);
+      await testPage.bringToFront(); // the agent targets the active content tab
+      await pg.click("#send-btn");
+      return panelIdle(pg, prevAnswers);
+    };
+
+    // Chat history read from chrome.storage.local; every write is polled for, never slept on.
+    const readHistory = () =>
+      optPage.evaluate(
+        async ([idxKey, prefix, promptKey]) => {
+          const all = await chrome.storage.local.get(null);
+          const bodies = {};
+          for (const [k, v] of Object.entries(all)) if (k.startsWith(prefix)) bodies[k.slice(prefix.length)] = v;
+          return { index: all[idxKey] ?? null, bodies, prompts: all[promptKey] ?? null };
+        },
+        [SESSIONS_INDEX_KEY, SESSION_BODY_PREFIX, PROMPT_HISTORY_KEY],
+      );
+    const waitHistory = async (pred, timeoutMs = 5000) => {
+      let h = await readHistory();
+      for (let t = 0; t < timeoutMs && !pred(h); t += 100) {
+        await new Promise((r) => setTimeout(r, 100));
+        h = await readHistory();
+      }
+      return h;
+    };
+
+    // The content script's isolated world is the only context in a page that holds chrome.runtime, so a send from it is read through CDP, on a world
+    // reported for a page loaded after Runtime.enable.
+    const contentScriptSend = async (pg, msg) => {
+      const cdp = await pg.context().newCDPSession(pg);
+      const worlds = [];
+      cdp.on("Runtime.executionContextCreated", (e) => worlds.push(e.context));
+      await cdp.send("Runtime.enable");
+      await pg.reload({ waitUntil: "load" });
+      await new Promise((r) => setTimeout(r, 1500)); // the script lands at document_idle
+      const w = worlds
+        .filter((x) => x.auxData && x.auxData.isDefault === false && String(x.origin || "").includes(extId) && String(x.name || "").includes("OpenSidekick"))
+        .pop();
+      if (!w) return { reply: null, world: null };
+      const r = await cdp.send("Runtime.evaluate", {
+        expression: `new Promise((res) => chrome.runtime.sendMessage(${JSON.stringify(msg)}, (reply) => res(JSON.stringify(reply))))`,
+        contextId: w.id,
+        awaitPromise: true,
+        returnByValue: true,
+      });
+      await cdp.detach().catch(() => {});
+      return { reply: JSON.parse(r.result.value), world: w.origin };
+    };
+
+    // Record every sender the worker sees; a listener that never answers leaves the extension's own handlers untouched.
+    const recordSenders = async () => {
+      const swNow = context.serviceWorkers().find((w) => w.url().includes(extId));
+      await swNow.evaluate(() => {
+        globalThis.__senders = [];
+        chrome.runtime.onMessage.addListener((m, s) => {
+          globalThis.__senders.push({ type: m.type, tab: !!s.tab, frameId: s.frameId, isExt: new URL(s.url || "about:blank").origin === location.origin });
+          return false;
+        });
+      });
+      return swNow;
+    };
 
     // --- Options page: the Venice AI preset adds a fully configured provider
     // and removes cleanly. Uses a FRESH page — optPage was opened before the
@@ -1193,8 +1360,10 @@ async function main() {
 
     // Empty state + composer layout: one question line (no hero eyebrow), the
     // suggestions still fill the box, Send sits inside the field, the approval
-    // control sits under it, and the panel's controls are 32px+ targets.
+    // control sits under it, and panel controls are 32px+ targets; a paste first, so the strip's remove button is on the page to measure.
     await panel.fill("#input", "");
+    await pasteImage(panel, 40, 30);
+    await panel.waitForSelector("#attach-strip .att-remove");
     const ui = await panel.evaluate(() => {
       const box = (sel) => document.querySelector(sel)?.getBoundingClientRect() || { top: 0, bottom: 0, height: 0 };
       const send = document.getElementById("send-btn");
@@ -1214,6 +1383,8 @@ async function main() {
           seg: Math.min(...[...document.querySelectorAll(".seg")].map((el) => el.getBoundingClientRect().height)),
           newChat: box("#new-chat").height,
           contextHint: box("#context-hint").height,
+          paperclip: box("#attach-btn").height,
+          attRemove: box("#attach-strip .att-remove").height,
         },
       };
     });
@@ -1222,7 +1393,18 @@ async function main() {
     check(ui.buttons === 3 && ui.example && ui.filled === ui.example, `empty: three suggestion buttons, and the first fills the box with its prompt (got ${ui.buttons}, "${ui.filled}")`);
     check(ui.sendInField && ui.sendLabel === "Send", `composer: Send is an icon button inside the field labelled "Send" (in field ${ui.sendInField}, label "${ui.sendLabel}")`);
     check(ui.segUnder, "composer: the approval control sits under the field");
-    check(Object.values(ui.heights).every((h) => h >= 32), `composer: Send, segments, New chat and the site chip are 32px+ targets (got ${JSON.stringify(ui.heights)})`);
+    check(Object.values(ui.heights).every((h) => h >= 32), `composer: Send, paperclip, the strip's remove, segments, New chat and the site chip are 32px+ targets (got ${JSON.stringify(ui.heights)})`);
+
+    // The Send cue read as computed style: attached with an empty textarea keeps Send on the accent, nothing attached and empty goes quiet. The quiet
+    // rule outranks the accent fill, and the fill has a 120ms transition, so each state is measured after it settles.
+    await panel.fill("#input", "");
+    await panel.waitForTimeout(300);
+    const cueLive = await sendCue(panel);
+    await panel.click("#attach-strip .att-chip:first-child .att-remove");
+    await panel.waitForTimeout(300);
+    const cueQuiet = await sendCue(panel);
+    check(cueLive.send === cueLive.accent, `composer: Send is on the accent when an image is attached with nothing typed (got "${cueLive.send}", wanted "${cueLive.accent}")`);
+    check(cueQuiet.send === cueQuiet.sunken, `composer: Send goes quiet with nothing attached and an empty box (got "${cueQuiet.send}", wanted "${cueQuiet.sunken}")`);
     await panel.close();
 
     // --- Scheduled task: "Run now" opens the URL and runs the task headlessly ---
@@ -1411,7 +1593,316 @@ async function main() {
     check(lastImageUrl.startsWith("data:image/png;base64,"), `image-tab: attached a PNG image (got "${lastImageUrl.slice(0, 30)}")`);
     const imgB64 = lastImageUrl.split(",")[1] || "";
     check(imgB64.length > 0 && imgB64.length < 2000, `image-tab: attached the direct full-res image, not a viewport screenshot (base64 len ${imgB64.length})`);
+
+    // The same cap on the tool path: a tab that is one huge direct image is refused by the shared MAX_BASE64_CHARS rule, so the tool falls back to a screenshot.
+    await imgPage.goto(`${base}/big.png`, { waitUntil: "load" });
+    await imgPage.bringToFront();
+    await optPage.evaluate(() => (window.__events = []));
+    lastImageUrl = "";
+    lastImageDims = { w: 0, h: 0 };
+    lastImageBytes = 0;
+    await optPage.evaluate(([rt, t]) => chrome.runtime.sendMessage({ type: rt, task: t, newChat: true }), [MSG.RUN_TASK, "inspect the image on this tab"]);
+    for (let i = 0; i < 120; i++) {
+      const evs = await optPage.evaluate(() => window.__events || []);
+      if (evs.some((e) => e.kind === "idle")) break;
+      await new Promise((r) => setTimeout(r, 200));
+    }
+    const bigEvents = await optPage.evaluate(() => window.__events || []);
+    const bigB64 = lastImageUrl.split(",")[1] || "";
+    check(bigEvents.filter((e) => e.kind === "error").length === 0, `tool cap: the oversized direct image ran without an error (${bigEvents.filter((e) => e.kind === "error").map((e) => e.error).join("; ")})`);
+    check(
+      lastImageBytes > 0 && lastImageBytes < MAX_BASE64_CHARS && lastImageDims.w > 400,
+      `tool cap: a direct image over the cap falls back to a viewport screenshot (${lastImageDims.w}x${lastImageDims.h}, ${lastImageBytes} bytes, base64 len ${bigB64.length})`,
+    );
     await imgPage.close();
+    await testPage.bringToFront();
+
+    // --- Composer attachments: paste, drop, pick, downscale, caps, History ---
+    const attPanel = await context.newPage();
+    await attPanel.goto(`chrome-extension://${extId}/src/sidepanel/sidepanel.html`, { waitUntil: "load" });
+    await attPanel.waitForTimeout(400);
+    await attPanel.click("#new-chat");
+    await attPanel.waitForTimeout(300);
+
+    // Reads of the composer's real state, all in-page: strip, notes, armed class, computed visibility, user bubbles.
+    const attThumbs = () => attPanel.$$eval("#attach-strip .att-thumb", (n) => n.length).catch(() => 0);
+    const attNotes = () => attPanel.$$eval(".note", (n) => n.map((e) => e.textContent)).catch(() => []);
+    const stripDisplay = () => attPanel.$eval("#attach-strip", (el) => getComputedStyle(el).display).catch(() => "");
+    const fieldArmed = () => attPanel.$eval(".composer-field", (el) => el.classList.contains("has-attachments")).catch(() => false);
+    const attUserBubbles = () => attPanel.$$eval(".msg.user", (n) => n.map((e) => e.textContent)).catch(() => []);
+    const warnTexts = () => attPanel.$$eval(".alert.warn", (n) => n.map((e) => e.textContent)).catch(() => []);
+    const waitThumbs = async (want) => {
+      for (let i = 0; i < 60; i++) {
+        if ((await attThumbs()) === want) return true;
+        await new Promise((r) => setTimeout(r, 100));
+      }
+      return false;
+    };
+    // A refusal note lands asynchronously — the decode decides, slowly for a big source — so notes are polled for, not read once.
+    const waitNotes = async (re) => {
+      for (let i = 0; i < 60; i++) {
+        const n = await attNotes();
+        if (n.some((t) => re.test(t))) return n;
+        await new Promise((r) => setTimeout(r, 100));
+      }
+      return await attNotes();
+    };
+    // A text-only clipboard: the handler must leave it to the textarea; a synthetic event has no default action, so intercepted is what is measured.
+    const pasteText = (text) =>
+      attPanel.evaluate((t) => {
+        const ta = document.getElementById("input");
+        ta.focus();
+        ta.value = t; // what the browser's own paste inserts
+        const dt = new DataTransfer();
+        dt.setData("text/plain", t);
+        const ev = new ClipboardEvent("paste", { clipboardData: dt, bubbles: true, cancelable: true });
+        ta.dispatchEvent(ev);
+        return { value: ta.value, intercepted: ev.defaultPrevented };
+      }, text);
+    // A drag-and-drop delivered to a named element, as a file the panel must take.
+    const dropFilesOn = (sel) =>
+      attPanel.evaluate(async (s) => {
+        const c = document.createElement("canvas");
+        c.width = 50;
+        c.height = 50;
+        const blob = await new Promise((r) => c.toBlob(r, "image/png"));
+        const dt = new DataTransfer();
+        dt.items.add(new File([blob], "drop.png", { type: "image/png" }));
+        const el = document.querySelector(s);
+        el.dispatchEvent(new DragEvent("dragover", { dataTransfer: dt, bubbles: true, cancelable: true }));
+        el.dispatchEvent(new DragEvent("drop", { dataTransfer: dt, bubbles: true, cancelable: true }));
+      }, sel);
+    // A paste whose label is a type the bytes are not: three bytes named image/png.
+    const pasteStub = (bytes, type) =>
+      attPanel.evaluate(([b, t]) => {
+        const dt = new DataTransfer();
+        dt.items.add(new File([new Uint8Array(b)], "stub.png", { type: t }));
+        const ta = document.getElementById("input");
+        ta.focus();
+        ta.dispatchEvent(new ClipboardEvent("paste", { clipboardData: dt, bubbles: true, cancelable: true }));
+      }, [bytes, type]);
+
+    lastImageUrl = "";
+    imageRequests = 0;
+    const pasteSize = await pasteImage(attPanel, 60, 40);
+    check(await waitThumbs(1), `attach: a pasted PNG adds a thumbnail (blob ${pasteSize} bytes)`);
+    check(await attPanel.$eval("#attach-strip .att-thumb", (el) => el.naturalWidth > 0), "attach: the data: thumbnail renders under MV3's CSP");
+    check((await stripDisplay()) === "flex", `attach: the strip is visible when an image is armed (display "${await stripDisplay()}")`);
+    await attPanel.fill("#input", "What is in the attached image?");
+    await testPage.bringToFront();
+    await attPanel.click("#send-btn");
+    const attA = await panelIdle(attPanel, 0);
+    check(attA > 0, "attach: the run completed through the composer");
+    check((await lastAssistant(attPanel)) === "image_seen=yes", `attach: the image reached the provider in the same turn (got "${await lastAssistant(attPanel)}")`);
+    check(lastImageUrl.startsWith("data:image/png;base64,"), `attach: the provider got a PNG data URI (got "${lastImageUrl.slice(0, 26)}")`);
+    // A file under the limit keeps its own bytes: the mock decoded the part, so the wire length is the pasted blob, not a re-encode.
+    check(lastImageBytes === pasteSize, `attach: a small file reaches the wire as its own bytes (decoded ${lastImageBytes}, pasted ${pasteSize})`);
+    check((await attPanel.$$eval(".msg.user img.att-thumb.sent", (n) => n.length).catch(() => 0)) === 1, "attach: the user bubble shows the image");
+    check(
+      (await attThumbs()) === 0 && (await stripDisplay()) === "none" && !(await fieldArmed()),
+      `attach: the strip hides and the field unarms after the send (thumbs ${await attThumbs()}, display "${await stripDisplay()}", armed ${await fieldArmed()})`,
+    );
+
+    // Downscale: the strip's thumbnail is the downscaled image, so the 1568 px long edge is asserted on the paste path's own output.
+    await attPanel.click("#new-chat");
+    await attPanel.waitForTimeout(300);
+    await pasteImage(attPanel, 2000, 2000);
+    check(await waitThumbs(1), "attach-big: a 2000x2000 paste is accepted");
+    const stripDims = await attPanel.$eval("#attach-strip .att-thumb", (el) => ({ w: el.naturalWidth, h: el.naturalHeight }));
+    check(stripDims.w === 1568 && stripDims.h === 1568, `attach-big: the strip shows the downscaled 1568px image (thumb ${stripDims.w}x${stripDims.h})`);
+    await attPanel.fill("#input", "What is in the attached image?");
+    await attPanel.click("#send-btn");
+    check((await panelIdle(attPanel, 0)) > 0, "attach-big: the run completed");
+
+    // Over 40 megapixels is refused on the decoded area, before any canvas is built, and nothing reaches the strip.
+    await attPanel.click("#new-chat");
+    await attPanel.waitForTimeout(300);
+    const areaSize = await pasteImage(attPanel, 8001, 5000); // 40.005 MP, tiny as a solid-fill PNG
+    const areaNotes = await waitNotes(/40 megapixels/);
+    check((await attThumbs()) === 0 && areaNotes.some((t) => /40 megapixels/.test(t)), `attach-cap: a 40-megapixel source is refused with the area note (blob ${areaSize} bytes, thumbs ${await attThumbs()}, notes ${JSON.stringify(areaNotes)})`);
+
+    // A corrupt file: the label says image/png and the bytes are none of the four formats, so the signature decides.
+    await attPanel.click("#new-chat");
+    await attPanel.waitForTimeout(300);
+    await pasteStub([0x00, 0x41, 0x42], "image/png");
+    const corruptNotes = await waitNotes(/Not an image/);
+    check((await attThumbs()) === 0 && corruptNotes.some((t) => /Not an image/.test(t)), `attach-corrupt: 3 bytes labelled image/png is refused as not an image (notes ${JSON.stringify(corruptNotes)})`);
+
+    // The label lie, through the panel: JPEG bytes declared image/png; the strip and the wire carry the type the bytes proved.
+    await attPanel.click("#new-chat");
+    await attPanel.waitForTimeout(300);
+    lastImageUrl = "";
+    lastImageBytes = 0;
+    const lieSize = await pasteImage(attPanel, 60, 40, "image/jpeg", "image/png");
+    await waitThumbs(1);
+    await attPanel.fill("#input", "What is in the attached image?");
+    await attPanel.click("#send-btn");
+    await panelIdle(attPanel, 0);
+    check(lastImageUrl.startsWith("data:image/jpeg;base64,"), `attach-lie: a JPEG named image/png reaches the wire as image/jpeg, the type the bytes proved, not the label (blob ${lieSize} bytes, got "${lastImageUrl.slice(0, 25)}")`);
+
+    // Size cap: a 6 MB file is refused before any decode, with a note.
+    await attPanel.click("#new-chat");
+    await attPanel.waitForTimeout(300);
+    await attPanel.evaluate(async () => {
+      const dt = new DataTransfer();
+      dt.items.add(new File([new Uint8Array(6 * 1024 * 1024)], "big.png", { type: "image/png" }));
+      const ta = document.getElementById("input");
+      ta.focus();
+      ta.dispatchEvent(new ClipboardEvent("paste", { clipboardData: dt, bubbles: true, cancelable: true }));
+    });
+    const capNotes = await waitNotes(/5 MB/);
+    check((await attThumbs()) === 0 && capNotes.some((t) => /5 MB/.test(t)), `attach-cap: a 6 MB file is refused with the size note (notes: ${JSON.stringify(capNotes)})`);
+
+    // Count cap: the fifth image is refused, four thumbnails stay.
+    for (let i = 0; i < 5; i++) await pasteImage(attPanel, 40, 30);
+    const countNotes = await waitNotes(/4 images/);
+    check((await waitThumbs(4)) && countNotes.some((t) => /4 images/.test(t)), `attach-cap: the fifth image is refused (thumbs ${await attThumbs()})`);
+
+    // The picker through the paperclip: the file chooser the button opens is what is answered, so the hidden input stays hidden.
+    await attPanel.click("#new-chat");
+    await attPanel.waitForTimeout(300);
+    const chooser = attPanel.waitForEvent("filechooser");
+    await attPanel.click("#attach-btn");
+    await (await chooser).setFiles({ name: "pick.png", mimeType: "image/png", buffer: IMG_PNG });
+    check(await waitThumbs(1), "attach: the paperclip opens the picker and a picked file adds a thumbnail");
+
+    // The drop is whole-panel: a file dropped on the message list is accepted, and the unconditional preventDefault stops the panel navigating to it.
+    const urlBeforeDrop = attPanel.url();
+    await dropFilesOn("#messages");
+    check(
+      (await waitThumbs(2)) && attPanel.url() === urlBeforeDrop,
+      `attach: a file dropped outside the composer is accepted and the panel stays put (thumbs ${await attThumbs()}, url ${attPanel.url()})`,
+    );
+
+    // Remove: the × on a chip takes just that image out.
+    await attPanel.click("#attach-strip .att-chip:first-child .att-remove");
+    check(await waitThumbs(1), `attach: the remove button takes one image out (thumbs ${await attThumbs()})`);
+
+    // A text-only paste is not intercepted: the text reaches the textarea and the composer adds nothing, from a clean composer.
+    await attPanel.click("#new-chat");
+    await attPanel.waitForTimeout(300);
+    const textPaste = await pasteText("summarize this page in 3 bullets");
+    check(
+      textPaste.value.includes("summarize this page in 3 bullets") && !textPaste.intercepted && (await attThumbs()) === 0,
+      `attach: a text-only paste is left to the textarea (value "${textPaste.value}", intercepted ${textPaste.intercepted}, thumbs ${await attThumbs()})`,
+    );
+
+    // History keeps the words of the attachment turn and never the image.
+    const attBodies = await optPage.evaluate(
+      async ([idxKey, prefix]) => {
+        const all = await chrome.storage.local.get(null);
+        return Object.entries(all).filter(([k]) => k.startsWith(prefix)).map(([, v]) => JSON.stringify(v));
+      },
+      [SESSIONS_INDEX_KEY, SESSION_BODY_PREFIX],
+    );
+    check(attBodies.some((b) => /What is in the attached image\?/.test(b)), "attach: History keeps the text of the attachment turn");
+    check(!attBodies.some((b) => b.includes("data:image")), "attach: History never stores the image");
+
+    // An image with nothing typed is still a send: the module's fixed task line reaches the provider and the bubble shows it.
+    await attPanel.click("#new-chat");
+    await attPanel.waitForTimeout(300);
+    await attPanel.fill("#input", "");
+    const imgOnlyBefore = imageRequests;
+    await pasteImage(attPanel, 60, 40);
+    await testPage.bringToFront();
+    await attPanel.click("#send-btn");
+    const imgOnlyA = await panelIdle(attPanel, 0);
+    const imgOnlyBubble = (await attUserBubbles())[0] || "";
+    check(
+      imgOnlyA > 0 && imgOnlyBubble === IMAGE_ONLY_TASK && (imageRequests - imgOnlyBefore) === 1 && (await lastAssistant(attPanel)) === "image_seen=yes",
+      `attach: an image-only send uses the fixed task line and carries the image (bubble "${imgOnlyBubble}", image requests ${imageRequests - imgOnlyBefore}, answer "${await lastAssistant(attPanel)}")`,
+    );
+
+    // A History delete clears the composer: the image pasted for the chat being deleted belongs to that chat.
+    const openChatId = (await waitHistory((h) => !!h.index?.currentId)).index?.currentId;
+    await pasteImage(attPanel, 40, 30);
+    const armedBeforeDelete = await attThumbs();
+    const canDelete = !!openChatId;
+    if (canDelete) {
+      await openHistory(attPanel);
+      await attPanel.click(`${histRow(openChatId)} .hist-delete`);
+      await attPanel.click(`${histRow(openChatId)} .hist-confirm-yes`);
+    }
+    check(
+      canDelete && armedBeforeDelete > 0 && (await waitThumbs(0)) && !(await fieldArmed()) && (await attPanel.$$eval(".msg", (n) => n.length).catch(() => 0)) === 0,
+      `attach: deleting the open chat from History clears the strip, the field and the transcript (chat ${openChatId}, armed ${armedBeforeDelete}, thumbs ${await attThumbs()}, armed now ${await fieldArmed()})`,
+    );
+
+    // A resumed chat sends its words, never its image: sessions.js keeps images off disk.
+    await attPanel.click("#new-chat");
+    await attPanel.waitForTimeout(300);
+    await attPanel.fill("#input", "What is in the attached image?");
+    await pasteImage(attPanel, 60, 40);
+    await testPage.bringToFront();
+    await attPanel.click("#send-btn");
+    await panelIdle(attPanel, 0);
+    const attChat = (await waitHistory((h) => h.index?.items.some((i) => /attached image/.test(i.title || "")))).index?.items.find((i) => /attached image/.test(i.title || ""));
+    const resumeId = attChat?.id;
+    const canResume = !!resumeId;
+    await attPanel.click("#new-chat"); // leave the attachment chat, so History resumes it
+    await attPanel.waitForTimeout(300);
+    const resumedBefore = imageRequests;
+    if (canResume) {
+      await openHistory(attPanel);
+      await attPanel.click(`${histRow(resumeId)} .hist-open`);
+      await attPanel.waitForSelector(`${histRow(resumeId)} .hist-open[aria-current]`, { timeout: 5000 }).catch(() => {});
+    }
+    const resumedA = await panelSend(attPanel, "And for dogs.", await assistantCount(attPanel));
+    check(
+      canResume && resumedA > 0 && imageRequests === resumedBefore,
+      `attach: a chat resumed from History sends no image on the follow-up (chat ${resumeId}, image requests ${imageRequests - resumedBefore} on the follow-up)`,
+    );
+
+    // The vision warning fires for the user's own attachment, not only for a screenshot the agent captured: the mock answers 400 keyed on this turn.
+    await attPanel.click("#new-chat");
+    await attPanel.waitForTimeout(300);
+    await pasteImage(attPanel, 60, 40);
+    await attPanel.fill("#input", "Vision refusal test");
+    await testPage.bringToFront();
+    await attPanel.click("#send-btn");
+    const settled = await panelSettled(attPanel);
+    const visionWarn = (await warnTexts()).join(" | ");
+    check(
+      settled && /image/.test(visionWarn) && /multimodal/.test(visionWarn),
+      `attach-warning: a provider 400 on a user attachment shows the vision warning naming the image (warnings: ${JSON.stringify(await warnTexts())})`,
+    );
+
+    // The worker, not the panel, is the trust boundary: five images from a non-panel extension page get the worker's refusal and no run starts.
+    const apiBeforeBoundary = apiRequests;
+    await optPage.evaluate(() => (window.__events = []));
+    const boundaryReply = await optPage.evaluate(
+      ([rt, b64, n]) => chrome.runtime.sendMessage({ type: rt, task: "boundary probe task", images: Array.from({ length: n }, () => ({ mediaType: "image/png", data: b64 })) }),
+      [MSG.RUN_TASK, IMG_B64, 5],
+    );
+    await new Promise((r) => setTimeout(r, 600));
+    const bEvents = await optPage.evaluate(() => window.__events || []);
+    check(
+      boundaryReply && boundaryReply.ok === false && boundaryReply.error === "bad-attachment" && apiRequests === apiBeforeBoundary && !bEvents.some((e) => e.kind === "user_echo"),
+      `attach-boundary: the worker rejects 5 images as bad-attachment and starts no run (reply ${JSON.stringify(boundaryReply)}, provider requests ${apiRequests - apiBeforeBoundary})`,
+    );
+    check(bEvents.some((e) => e.kind === "error" && /Attachment rejected/.test(e.error || "")), `attach-boundary: the worker names the reason to the caller (${JSON.stringify(bEvents.filter((e) => e.kind === "error").map((e) => e.error))})`);
+
+    // A page has no chrome.runtime at all, so the only context that can reach RUN_TASK is inside the extension.
+    const pageRuntime = await testPage.evaluate(() => typeof chrome.runtime);
+    check(pageRuntime === "undefined", `boundary: a normal page has no chrome.runtime to start a run with (got ${pageRuntime})`);
+
+    // The RUN_TASK door. sender.tab is present for the panel and the options page exactly as for a content script, and frameId is 0 for all three, so a
+    // tab-based rule kills the user's own Send; the rule is the sender's origin, recorded in the worker's listener.
+    const swDoor = await recordSenders();
+    const panelDoor = await attPanel.evaluate(([rt, t]) => chrome.runtime.sendMessage({ type: rt, task: t, newChat: true }), [MSG.RUN_TASK, "Door probe from the panel."]);
+    const optDoor = await optPage.evaluate(([rt, t]) => chrome.runtime.sendMessage({ type: rt, task: t, newChat: true }), [MSG.RUN_TASK, "Door probe from the options page."]);
+    const csDoor = await contentScriptSend(testPage, { type: MSG.RUN_TASK, task: "Door probe from a content script.", newChat: true });
+    const doorSenders = (await swDoor.evaluate(() => globalThis.__senders)).filter((s) => s.type === MSG.RUN_TASK);
+    check(
+      panelDoor.ok === true && (optDoor.ok === true || optDoor.error === "A task is already running.") && csDoor.reply && csDoor.reply.error === "not-allowed",
+      `door: the panel and the options page may start a run, a content script may not (panel ${JSON.stringify(panelDoor)}, options ${JSON.stringify(optDoor)}, content script ${JSON.stringify(csDoor.reply)})`,
+    );
+    check(
+      doorSenders.length === 3 && doorSenders.every((s) => s.tab) && doorSenders.filter((s) => s.isExt).length === 2 && doorSenders.filter((s) => !s.isExt).length === 1,
+      `door: every sender carries a tab, so only the origin separates them (${JSON.stringify(doorSenders)})`,
+    );
+
+    await attPanel.close();
     await testPage.bringToFront();
 
     // --- Stuck-panel recovery: Stop and orphaned prompt answers always emit
@@ -1494,22 +1985,6 @@ async function main() {
     // --- Context survives closing & reopening the PANEL, driven through the real
     // composer (the first submit after reopen used to send newChat:true and wipe
     // the restored conversation). ---
-    const panelIdle = async (pg, prevAnswers) => {
-      for (let i = 0; i < 120; i++) {
-        const idle = await pg.$eval("#send-btn", (el) => !el.hidden).catch(() => false);
-        const answers = await pg.$$eval(".msg.assistant", (n) => n.length).catch(() => 0);
-        if (idle && answers > prevAnswers) return answers;
-        await new Promise((r) => setTimeout(r, 200));
-      }
-      return -1;
-    };
-    const panelSend = async (pg, text, prevAnswers) => {
-      await pg.fill("#input", text);
-      await testPage.bringToFront(); // the agent targets the active content tab
-      await pg.click("#send-btn");
-      return panelIdle(pg, prevAnswers);
-    };
-
     const panel1 = await context.newPage();
     await panel1.goto(`chrome-extension://${extId}/src/sidepanel/sidepanel.html`, { waitUntil: "load" });
     await panel1.waitForTimeout(400);
@@ -1535,24 +2010,6 @@ async function main() {
     // The live chat is saved to chrome.storage.local at each run end, listed in
     // the panel's History menu, and governed by Settings → Chat history. Every
     // write is polled for, never slept on.
-    const readHistory = () =>
-      optPage.evaluate(
-        async ([idxKey, prefix, promptKey]) => {
-          const all = await chrome.storage.local.get(null);
-          const bodies = {};
-          for (const [k, v] of Object.entries(all)) if (k.startsWith(prefix)) bodies[k.slice(prefix.length)] = v;
-          return { index: all[idxKey] ?? null, bodies, prompts: all[promptKey] ?? null };
-        },
-        [SESSIONS_INDEX_KEY, SESSION_BODY_PREFIX, PROMPT_HISTORY_KEY],
-      );
-    const waitHistory = async (pred, timeoutMs = 5000) => {
-      let h = await readHistory();
-      for (let t = 0; t < timeoutMs && !pred(h); t += 100) {
-        await new Promise((r) => setTimeout(r, 100));
-        h = await readHistory();
-      }
-      return h;
-    };
     // A copy of the context block's CDP sequence (closing the worker's target),
     // marking the old worker so a caller can prove the next one is fresh.
     const stopWorker = async () => {
@@ -1571,19 +2028,12 @@ async function main() {
         return false;
       }
     };
-    const openHistory = async (pg) => {
-      await pg.click("#history-btn");
-      await pg.waitForSelector("#hist-menu:not([hidden]) .hist-body > *", { timeout: 5000 });
-    };
-    const histRow = (id) => `#hist-menu li.hist-item[data-id="${id}"]`;
     const openPanel = async () => {
       const pg = await context.newPage();
       await pg.goto(`chrome-extension://${extId}/src/sidepanel/sidepanel.html`, { waitUntil: "load" });
       await pg.waitForTimeout(500); // GET_STATE and the config read
       return pg;
     };
-    const lastAssistant = (pg) => pg.$$eval(".msg.assistant", (els) => (els.length ? els[els.length - 1].textContent : "")).catch(() => "");
-    const assistantCount = (pg) => pg.$$eval(".msg.assistant", (n) => n.length).catch(() => 0);
 
     const sPages = [];
     try {
