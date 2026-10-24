@@ -141,7 +141,11 @@
     </div>
 
     <form id="composer" class="composer">
-      <div id="slash-menu" class="slash-menu" hidden></div>
+      <!-- A div of divs is invisible to a screen reader: the listbox role and
+           name make the rows options with ids, and the composer carries the
+           pointer at the active row (aria-activedescendant, written by
+           renderSlashMenu once those ids are in the DOM). -->
+      <div id="slash-menu" class="slash-menu" role="listbox" aria-label="Saved prompts" hidden></div>
       <div id="site-menu" class="site-menu" hidden></div>
       <!-- The field is the focal object: Send lives inside it, and the
            approval control sits directly underneath. -->
@@ -150,7 +154,7 @@
              updateConfiguredUI rewrites the placeholder for the unconfigured
              state, so a reader would read "Add a model in Settings" as the
              field's name. The placeholder stays as the visible hint. -->
-        <textarea id="input" rows="2" placeholder="Ask about or act on this page…" aria-label="Ask about or act on this page"></textarea>
+        <textarea id="input" rows="2" placeholder="Ask about or act on this page…" aria-label="Ask about or act on this page" aria-expanded="false" aria-controls="slash-menu" aria-autocomplete="list"></textarea>
         <div class="composer-bar">
           <span class="composer-hint"><kbd>/</kbd> saved prompts</span>
           <div class="composer-buttons">

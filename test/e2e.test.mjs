@@ -1390,6 +1390,102 @@ async function main() {
     const slashInputVal = await panel.$eval("#input", (el) => el.value);
     check(slashInputVal === "Summarize this page in 3 bullets.", `slash: selecting inserts the prompt text (got "${slashInputVal}")`);
 
+    // --- Slash-menu semantics for a screen reader (a div of divs is invisible
+    // to one). Two prompts so ArrowDown has a second option to move to; the
+    // panel reloads prompts from the storage change, so poll for two rows.
+    await optPage.evaluate(([key, cfg]) => chrome.storage.local.set({ [key]: cfg }), [
+      STORAGE_KEY,
+      {
+        ...config,
+        prompts: [
+          { id: "p1", command: "summarize", text: "Summarize this page in 3 bullets." },
+          { id: "p2", command: "summary", text: "Summarize this page in 5 bullets." },
+        ],
+      },
+    ]);
+    await panel.fill("#input", "/sum");
+    await panel.waitForFunction(() => document.querySelectorAll("#slash-menu .slash-item").length >= 2, null, { timeout: 5000 }).catch(() => {});
+    const openList = await panel.evaluate(() => {
+      const menu = document.getElementById("slash-menu");
+      const input = document.getElementById("input");
+      const activeId = input.getAttribute("aria-activedescendant") || "";
+      return {
+        role: menu.getAttribute("role") || "",
+        label: menu.getAttribute("aria-label") || "",
+        visible: !menu.hidden,
+        items: [...menu.querySelectorAll(".slash-item")].map((el, i) => ({
+          id: el.id,
+          role: el.getAttribute("role") || "",
+          selected: el.getAttribute("aria-selected") || "",
+          resolves: !!document.getElementById(el.id),
+          wanted: `slash-${i}`,
+        })),
+        expanded: input.getAttribute("aria-expanded") || "",
+        controls: input.getAttribute("aria-controls") || "",
+        autocomplete: input.getAttribute("aria-autocomplete") || "",
+        activeId,
+        activeResolves: !!document.getElementById(activeId),
+        focusId: document.activeElement.id,
+      };
+    });
+    const selectedIds = openList.items.filter((it) => it.selected === "true").map((it) => it.id);
+    check(
+      openList.role === "listbox" && openList.label === "Saved prompts" && openList.visible,
+      `slash: the menu is a listbox named Saved prompts (role "${openList.role}", label "${openList.label}", visible ${openList.visible})`,
+    );
+    check(
+      openList.items.length >= 2 &&
+        openList.items.every((it) => it.role === "option" && it.id === it.wanted && it.resolves) &&
+        selectedIds.length === 1 &&
+        selectedIds[0] === "slash-0",
+      `slash: items are options with ids and one selected (${JSON.stringify(openList.items)}, selected ${JSON.stringify(selectedIds)})`,
+    );
+    check(
+      openList.expanded === "true" &&
+        openList.controls === "slash-menu" &&
+        openList.autocomplete === "list" &&
+        openList.activeId === "slash-0" &&
+        openList.activeResolves &&
+        openList.focusId === "input",
+      `slash: the composer describes the open listbox (${JSON.stringify(openList)})`,
+    );
+    // ArrowDown moves the activedescendant with the selection; Escape closes the
+    // list, clears the pointer, and leaves focus in the composer.
+    await panel.keyboard.press("ArrowDown");
+    const afterDown = await panel.evaluate(() => {
+      const input = document.getElementById("input");
+      const activeId = input.getAttribute("aria-activedescendant") || "";
+      const active = document.getElementById(activeId);
+      return {
+        activeId,
+        selected: [...document.querySelectorAll('#slash-menu .slash-item[aria-selected="true"]')].map((el) => el.id),
+        activeIsOption: !!active && active.getAttribute("role") === "option",
+        focusId: document.activeElement.id,
+      };
+    });
+    await panel.keyboard.press("Escape");
+    const afterEsc = await panel.evaluate(() => {
+      const input = document.getElementById("input");
+      return {
+        expanded: input.getAttribute("aria-expanded") || "",
+        hasActive: input.hasAttribute("aria-activedescendant"),
+        hidden: document.getElementById("slash-menu").hidden,
+        focusId: document.activeElement.id,
+      };
+    });
+    check(
+      afterDown.activeId === "slash-1" &&
+        afterDown.selected.length === 1 &&
+        afterDown.selected[0] === "slash-1" &&
+        afterDown.activeIsOption &&
+        afterDown.focusId === "input" &&
+        afterEsc.expanded === "false" &&
+        !afterEsc.hasActive &&
+        afterEsc.hidden &&
+        afterEsc.focusId === "input",
+      `slash: ArrowDown moves activedescendant, Escape clears it (down ${JSON.stringify(afterDown)}, escape ${JSON.stringify(afterEsc)})`,
+    );
+
     // Empty state + composer layout: one question line (no hero eyebrow), the
     // suggestions still fill the box, Send sits inside the field, the approval
     // control sits under it, and the panel's controls are 32px+ targets.

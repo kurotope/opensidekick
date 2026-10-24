@@ -1112,12 +1112,18 @@ function renderSlashMenu() {
   if (!slashItems.length) {
     els.slashMenu.innerHTML = `<div class="slash-empty">No matching saved prompts. Add some in Settings → Saved prompts.</div>`;
     els.slashMenu.hidden = false;
+    els.input.setAttribute("aria-expanded", "true");
+    // Nothing to point at: a pointer naming a row that isn't there is a silent
+    // no-op, so it is dropped rather than left pointing at a stale id.
+    els.input.removeAttribute("aria-activedescendant");
     return;
   }
+  // The row ids are written in the same pass that shows the menu, so the
+  // activedescendant below always has a target.
   els.slashMenu.innerHTML = slashItems
     .map(
       (p, i) =>
-        `<div class="slash-item${i === slashIndex ? " active" : ""}" data-i="${i}"><span class="slash-cmd">/${escapeHtml(p.command)}</span><span class="slash-preview">${escapeHtml((p.text || "").replace(/\s+/g, " "))}</span></div>`,
+        `<div class="slash-item${i === slashIndex ? " active" : ""}" id="slash-${i}" role="option" aria-selected="${i === slashIndex}" data-i="${i}"><span class="slash-cmd">/${escapeHtml(p.command)}</span><span class="slash-preview">${escapeHtml((p.text || "").replace(/\s+/g, " "))}</span></div>`,
     )
     .join("");
   els.slashMenu.querySelectorAll(".slash-item").forEach((el) =>
@@ -1127,6 +1133,11 @@ function renderSlashMenu() {
     }),
   );
   els.slashMenu.hidden = false;
+  // The composer describes the open list and names the row the reader should
+  // read. moveSlash re-renders through here, so ArrowDown moves the pointer
+  // with the selection — the keyboard code itself is unchanged.
+  els.input.setAttribute("aria-expanded", "true");
+  els.input.setAttribute("aria-activedescendant", `slash-${slashIndex}`);
 }
 
 function moveSlash(delta) {
@@ -1148,6 +1159,11 @@ function hideSlashMenu() {
   els.slashMenu.hidden = true;
   els.slashMenu.innerHTML = "";
   slashItems = [];
+  // The list is gone, so the composer stops describing it: a pointer naming a
+  // removed row says nothing, and aria-expanded left true promises a list the
+  // reader cannot find. Focus stays where it was — in the composer.
+  els.input.setAttribute("aria-expanded", "false");
+  els.input.removeAttribute("aria-activedescendant");
 }
 
 // -------------------------------------------------------------------------
