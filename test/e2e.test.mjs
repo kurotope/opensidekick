@@ -2903,6 +2903,75 @@ async function main() {
     check(savedMode === "auto", `autonomy: clicking Auto persists settings.autonomy (got "${savedMode}")`);
     const activeAfter = await gatePanel.$eval("#autonomy .seg.active", (el) => el.dataset.mode).catch(() => "");
     check(activeAfter === "auto", `autonomy: the Auto segment becomes active (got "${activeAfter}")`);
+    // (4) Arrow-key roving inside the Approval group: three buttons that are one
+    // control, so ArrowLeft/ArrowRight move focus between them and wrap at both
+    // ends. Focus moves, the mode does not — choosing a mode stays the click path,
+    // the only path that writes settings.autonomy. Only the focused segment is a
+    // tab stop, so Tab leaves the group; a group a reader can enter and never
+    // leave is a keyboard trap, so Tab is never consumed.
+    const segProbe = (pg) =>
+      pg
+        .evaluate(() => {
+          const g = document.getElementById("autonomy");
+          const segs = [...g.querySelectorAll(".seg")];
+          const a = document.activeElement;
+          return {
+            focus: a.dataset?.mode || "",
+            isSeg: a.classList.contains("seg"),
+            outside: !g.contains(a),
+            where: a.id || a.tagName,
+            pressed: segs.map((b) => b.getAttribute("aria-pressed")),
+            active: segs.find((b) => b.classList.contains("active"))?.dataset?.mode || "",
+            stops: segs.map((b) => b.tabIndex),
+          };
+        })
+        .catch(() => null);
+    // aria-pressed="true" stays on exactly one button: the stored mode's segment.
+    const pressedOnce = (p, mode) =>
+      p && p.active === mode && p.pressed.filter((x) => x === "true").length === 1 && p.pressed.indexOf("true") === ["plan", "ask", "auto"].indexOf(mode);
+    const readMode = (pg) =>
+      pg
+        .evaluate((key) => chrome.storage.local.get(key).then((r) => (r[key] && r[key].settings ? r[key].settings.autonomy : "")), STORAGE_KEY)
+        .catch(() => "");
+
+    await gatePanel.locator("#autonomy .seg.active").focus();
+    const r0 = await segProbe(gatePanel);
+    await gatePanel.keyboard.press("ArrowRight"); // Auto is the last segment, so this wraps to Plan
+    const r1 = await segProbe(gatePanel);
+    await gatePanel.keyboard.press("ArrowRight");
+    const r2 = await segProbe(gatePanel);
+    await gatePanel.keyboard.press("ArrowLeft");
+    const r3 = await segProbe(gatePanel);
+    check(
+      pressedOnce(r0, "auto") &&
+        pressedOnce(r1, "auto") &&
+        pressedOnce(r2, "auto") &&
+        pressedOnce(r3, "auto") &&
+        r0?.focus === "auto" &&
+        r1?.focus === "plan" &&
+        r2?.focus === "ask" &&
+        r3?.focus === "plan",
+      `composer: arrows rove the approval group (focus ${[r0, r1, r2, r3].map((p) => (p ? p.focus : "?")).join("→")}, pressed once ${[r0, r1, r2, r3].map((p) => pressedOnce(p, "auto")).join(",")})`,
+    );
+    // Tab from the first segment, where roving left the focus: Tab is not
+    // consumed, so the group keeps its exit. Without roving the focus never moves
+    // off Auto, so this check is red for the same reason the arrow check is.
+    await gatePanel.keyboard.press("Tab");
+    const tabbed = await segProbe(gatePanel);
+    check(
+      r3?.focus === "plan" && tabbed && tabbed.outside && !tabbed.isSeg,
+      `composer: Tab still crosses the approval group (from "${r3 && r3.focus}", landed "${tabbed && tabbed.where}", outside ${tabbed && tabbed.outside}, isSeg ${tabbed && tabbed.isSeg}, stops ${JSON.stringify(tabbed && tabbed.stops)})`,
+    );
+    // Roving moved focus, not the mode; the click persists it.
+    const rovedMode = await readMode(gatePanel);
+    await gatePanel.click('#autonomy .seg[data-mode="plan"]');
+    await gatePanel.waitForTimeout(250);
+    const clickedMode = await readMode(gatePanel);
+    const clickedUI = await gatePanel.$eval("#autonomy .seg.active", (el) => el.dataset.mode).catch(() => "");
+    check(
+      rovedMode === "auto" && clickedMode === "plan" && clickedUI === "plan",
+      `composer: roving does not change the mode; a click persists it (roved "${rovedMode}", clicked "${clickedMode}", active "${clickedUI}")`,
+    );
     await gatePanel.close();
 
   } finally {

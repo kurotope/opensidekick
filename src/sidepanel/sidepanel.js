@@ -130,6 +130,16 @@ async function init() {
   els.autonomy.querySelectorAll(".seg").forEach((btn) =>
     btn.addEventListener("click", () => setAutonomy(btn.dataset.mode)),
   );
+  // Arrows rove the Approval group; Tab is left alone, so the group has an exit.
+  els.autonomy.addEventListener("keydown", (e) => {
+    if (e.key === "ArrowRight") {
+      e.preventDefault();
+      roveSegs(1);
+    } else if (e.key === "ArrowLeft") {
+      e.preventDefault();
+      roveSegs(-1);
+    }
+  });
 
   // Saved prompts for the "/" menu — load now and keep in sync.
   loadPrompts();
@@ -372,7 +382,25 @@ function setAutonomyUI(mode) {
     const on = b.dataset.mode === mode;
     b.classList.toggle("active", on);
     b.setAttribute("aria-pressed", on ? "true" : "false");
+    // The group is one tab stop, entered at the mode that is on. Three tab stops
+    // in a row means a reader crosses the group button by button; with the stop
+    // on the active segment, Tab goes through the group and out of it.
+    b.tabIndex = on ? 0 : -1;
   });
+}
+
+// Arrow-key roving inside the Approval group: focus moves, the mode does not.
+// setAutonomy is the click path and the only writer of settings.autonomy, so a
+// reader who arrows through the group changes no setting. The tab stop travels
+// with the focus, which is what keeps Tab an exit — a group you can enter and
+// never leave is a keyboard trap.
+function roveSegs(dir) {
+  const segs = [...els.autonomy.querySelectorAll(".seg")];
+  const i = segs.indexOf(document.activeElement);
+  if (i < 0) return;
+  const next = segs[(i + dir + segs.length) % segs.length]; // wrap at both ends
+  segs.forEach((b) => (b.tabIndex = b === next ? 0 : -1));
+  next.focus();
 }
 
 // Persist the chosen approval mode without touching the rest of the config.
