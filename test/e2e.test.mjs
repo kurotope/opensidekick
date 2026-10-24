@@ -1595,6 +1595,60 @@ async function main() {
     }, STORAGE_KEY);
     check(wfCount === 1, `wf-persist: workflow survives an options-page interaction (${wfCount} in storage)`);
 
+    // --- The Saved workflows menu is a dialog a reader can enter and leave ---
+    // role="dialog" on its own is a false promise (threat 10): the trigger has to
+    // say it is expanded, focus has to land inside on open, and Escape has to hand
+    // focus back to the button instead of leaving it on document.body (threat 7).
+    const wfPanel = await context.newPage();
+    await wfPanel.goto(`chrome-extension://${extId}/src/sidepanel/sidepanel.html`, { waitUntil: "load" });
+    await wfPanel.waitForTimeout(500);
+    await wfPanel.click("#workflows-btn");
+    await wfPanel.waitForSelector("#wf-menu:not([hidden]) .wf-item", { timeout: 5000 }).catch(() => {});
+    const wfOpen = await wfPanel.evaluate(() => ({
+      role: document.getElementById("wf-menu").getAttribute("role"),
+      label: document.getElementById("wf-menu").getAttribute("aria-label"),
+      tab: document.getElementById("wf-menu").getAttribute("tabindex"),
+      popup: document.getElementById("workflows-btn").getAttribute("aria-haspopup"),
+      expanded: document.getElementById("workflows-btn").getAttribute("aria-expanded"),
+      controls: document.getElementById("workflows-btn").getAttribute("aria-controls"),
+      focusIn: document.getElementById("wf-menu").contains(document.activeElement),
+      focusId: document.activeElement.id,
+    }));
+    check(
+      wfOpen.role === "dialog" && wfOpen.label === "Saved workflows" && wfOpen.tab === "-1" &&
+        wfOpen.popup === "dialog" && wfOpen.expanded === "true" && wfOpen.controls === "wf-menu",
+      `workflows: the menu is a named dialog and its trigger describes it (${JSON.stringify(wfOpen)})`,
+    );
+    check(wfOpen.focusIn, `workflows: focus lands inside on open (activeElement id "${wfOpen.focusId}")`);
+    await wfPanel.keyboard.press("Escape");
+    await wfPanel.waitForSelector("#wf-menu", { state: "hidden", timeout: 5000 }).catch(() => {});
+    const wfEsc = await wfPanel.evaluate(() => ({
+      hidden: document.getElementById("wf-menu").hidden,
+      expanded: document.getElementById("workflows-btn").getAttribute("aria-expanded"),
+      active: document.activeElement && document.activeElement.id,
+    }));
+    check(
+      wfEsc.hidden && wfEsc.expanded === "false" && wfEsc.active === "workflows-btn",
+      `workflows: Esc closes and returns focus to the button (${JSON.stringify(wfEsc)})`,
+    );
+    // A document listener added at open and never removed fires on every later
+    // Escape: open, Escape, open, Escape, then one Escape with nothing open, and
+    // focus must stay on the button.
+    await wfPanel.click("#workflows-btn");
+    await wfPanel.waitForSelector("#wf-menu:not([hidden]) .wf-item", { timeout: 5000 }).catch(() => {});
+    await wfPanel.keyboard.press("Escape");
+    await wfPanel.waitForSelector("#wf-menu", { state: "hidden", timeout: 5000 }).catch(() => {});
+    await wfPanel.keyboard.press("Escape");
+    const wfLeak = await wfPanel.evaluate(() => ({
+      hidden: document.getElementById("wf-menu").hidden,
+      active: document.activeElement && document.activeElement.id,
+    }));
+    check(
+      wfLeak.hidden && wfLeak.active === "workflows-btn",
+      `workflows: the Escape listener does not outlive the menu (${JSON.stringify(wfLeak)})`,
+    );
+    await wfPanel.close();
+
     // --- An unsaved recording survives closing the panel ---
     await optPage.evaluate(([k, v]) => chrome.storage.session.set({ [k]: v }), [
       SESSION_PENDING_WF_KEY,
@@ -2086,6 +2140,43 @@ async function main() {
         `sessions: Esc closes the History menu and returns focus to the button (focus was inside ${focusedIn}, ${JSON.stringify(h12)})`,
       );
 
+      // A shared open/close pair must leave this menu's partial re-render alone: a
+      // passive refresh rewrites only .hist-body, so the status line (role="status")
+      // and the control that has focus both survive it.
+      await p2.focus("#history-btn");
+      await p2.keyboard.press("Enter");
+      await p2.waitForSelector("#hist-menu:not([hidden]) .hist-body > *", { timeout: 5000 }).catch(() => {});
+      await p2.waitForFunction(() => document.getElementById("hist-menu").contains(document.activeElement), null, { timeout: 5000 }).catch(() => {});
+      // A status line written by a real path: deleting a chat fills the status and
+      // focuses the next row, all inside the open menu.
+      await p2.click(`${histRow(plumId)} .hist-delete`);
+      await p2.click(`${histRow(plumId)} .hist-confirm-yes`);
+      await p2.waitForFunction(() => document.querySelector("#hist-menu .hist-status").textContent === "Chat deleted.", null, { timeout: 5000 }).catch(() => {});
+      const keepRow = await p2.evaluate(() => ({
+        id: document.activeElement.closest(".hist-item")?.dataset.id || "",
+        cls: document.activeElement.className,
+      }));
+      // The passive path is the panel's own storage listener; the index write makes
+      // the change fire without touching any chat.
+      const histIdx = (await readHistory()).index;
+      await optPage.evaluate(([key, i]) => chrome.storage.local.set({ [key]: { ...i, currentId: null } }), [SESSIONS_INDEX_KEY, histIdx]);
+      await p2.waitForFunction((want) => document.activeElement.closest(".hist-item")?.dataset.id === want, keepRow.id, { timeout: 5000 }).catch(() => {});
+      const keep = await p2.evaluate(() => ({
+        role: document.querySelector("#hist-menu .hist-status").getAttribute("role"),
+        text: document.querySelector("#hist-menu .hist-status").textContent,
+        inMenu: document.getElementById("hist-menu").contains(document.activeElement),
+        cls: document.activeElement.className,
+      }));
+      await optPage.evaluate(([key, i]) => chrome.storage.local.set({ [key]: i }), [SESSIONS_INDEX_KEY, histIdx]);
+      check(
+        keep.role === "status" && keep.text === "Chat deleted." && keep.inMenu && keep.cls === keepRow.cls,
+        `sessions: a passive refresh keeps .hist-status and focus (${JSON.stringify(keep)}, focus was ${JSON.stringify(keepRow)})`,
+      );
+      // Close it the way a keyboard user does, so the rest of the scenario starts
+      // with the menu closed and focus on the button, as it did before.
+      await p2.keyboard.press("Escape");
+      await p2.waitForSelector("#hist-menu", { state: "hidden", timeout: 5000 }).catch(() => {});
+
       // H13
       const btnBox = await p2.$eval("#history-btn", (el) => el.getBoundingClientRect().height);
       check(btnBox >= 32, `sessions: the History button is a 32px+ target (got ${btnBox})`);
@@ -2490,6 +2581,38 @@ async function main() {
     check(ruleNow === "allow", `site-chip: 'Trust' persists an allow rule (got ${ruleNow})`);
     const chipText2 = await chipPanel.$eval("#context-hint", (e) => e.textContent).catch(() => "");
     check(/allowed/.test(chipText2) && !/not allowed yet/.test(chipText2), `site-chip: chip reflects the new rule (got "${chipText2}")`);
+    // The chip's menu gets the same contract as the other two: a name, focus inside
+    // on open, and Escape back to the chip. The rule rows are real buttons, so the
+    // open check also proves focus went to a rule, not to the container.
+    await chipPanel.click("#context-hint");
+    await chipPanel.waitForSelector('#site-menu button[data-rule="allow"]', { timeout: 5000 }).catch(() => {});
+    const siteOpen = await chipPanel.evaluate(() => ({
+      role: document.getElementById("site-menu").getAttribute("role"),
+      label: document.getElementById("site-menu").getAttribute("aria-label"),
+      tab: document.getElementById("site-menu").getAttribute("tabindex"),
+      popup: document.getElementById("context-hint").getAttribute("aria-haspopup"),
+      expanded: document.getElementById("context-hint").getAttribute("aria-expanded"),
+      controls: document.getElementById("context-hint").getAttribute("aria-controls"),
+      focusIn: document.getElementById("site-menu").contains(document.activeElement),
+      focusRule: document.activeElement.getAttribute("data-rule") || "",
+    }));
+    check(
+      siteOpen.role === "dialog" && siteOpen.label === "Site rules" && siteOpen.tab === "-1" &&
+        siteOpen.popup === "dialog" && siteOpen.expanded === "true" && siteOpen.controls === "site-menu",
+      `site chip: the menu is a named dialog and its trigger describes it (${JSON.stringify(siteOpen)})`,
+    );
+    check(siteOpen.focusIn, `site chip: focus lands inside on open (rule button "${siteOpen.focusRule}")`);
+    await chipPanel.keyboard.press("Escape");
+    await chipPanel.waitForSelector("#site-menu", { state: "hidden", timeout: 5000 }).catch(() => {});
+    const siteEsc = await chipPanel.evaluate(() => ({
+      hidden: document.getElementById("site-menu").hidden,
+      expanded: document.getElementById("context-hint").getAttribute("aria-expanded"),
+      active: document.activeElement && document.activeElement.id,
+    }));
+    check(
+      siteEsc.hidden && siteEsc.expanded === "false" && siteEsc.active === "context-hint",
+      `site chip: Esc closes and returns focus to the chip (${JSON.stringify(siteEsc)})`,
+    );
     await chipPanel.close();
 
     // --- Markdown rendering in the chat transcript ---

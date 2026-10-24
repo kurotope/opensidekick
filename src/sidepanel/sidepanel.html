@@ -84,7 +84,10 @@
         <button id="record-btn" class="icon-btn" title="Record a workflow" aria-label="Record a workflow">
           <svg class="ic"><use href="#ic-record" /></svg>
         </button>
-        <button id="workflows-btn" class="icon-btn" title="Saved workflows" aria-label="Saved workflows">
+        <!-- aria-expanded is written by openMenu/closeMenu: a reader hears whether
+             the menu is open, and Escape hands focus back to this button. -->
+        <button id="workflows-btn" class="icon-btn" title="Saved workflows" aria-label="Saved workflows"
+                aria-haspopup="dialog" aria-expanded="false" aria-controls="wf-menu">
           <svg class="ic"><use href="#ic-workflows" /></svg>
         </button>
         <button id="history-btn" class="icon-btn" title="Chat history" aria-label="Chat history"
@@ -105,7 +108,11 @@
       </div>
     </header>
 
-    <div id="wf-menu" class="wf-menu" hidden></div>
+    <!-- The same contract as #hist-menu below: a name, a role, and tabindex so
+         focus can land inside when openMenu opens it. role="dialog" with no
+         focus management is worse than no role, so these three attributes and
+         openMenu/closeMenu in sidepanel.js are one change, not a decoration. -->
+    <div id="wf-menu" class="wf-menu" role="dialog" aria-label="Saved workflows" tabindex="-1" hidden></div>
     <!-- A non-modal dialog, not a menu: rows hold several buttons and an inline
          rename field. Only .hist-body is re-rendered, so the status line stays
          put and screen readers announce it. -->
@@ -146,7 +153,10 @@
            pointer at the active row (aria-activedescendant, written by
            renderSlashMenu once those ids are in the DOM). -->
       <div id="slash-menu" class="slash-menu" role="listbox" aria-label="Saved prompts" hidden></div>
-      <div id="site-menu" class="site-menu" hidden></div>
+      <!-- The site chip's menu: same dialog contract as the two header popovers,
+           named so a reader can tell what it is, and focus goes to the first rule
+           on open, with Escape handing it back to the chip. -->
+      <div id="site-menu" class="site-menu" role="dialog" aria-label="Site rules" tabindex="-1" hidden></div>
       <!-- The field is the focal object: Send lives inside it, and the
            approval control sits directly underneath. -->
       <div class="composer-field">
@@ -205,7 +215,11 @@
             Auto
           </button>
         </div>
-        <button type="button" id="context-hint" class="site-chip" title="Site rules for this page"></button>
+        <!-- The chip is the trigger for #site-menu, so it says what it opens and
+             whether it is open. Its name is the host + rule text written by
+             refreshContextHint, which is why no aria-label here. -->
+        <button type="button" id="context-hint" class="site-chip" title="Site rules for this page"
+                aria-haspopup="dialog" aria-expanded="false" aria-controls="site-menu"></button>
       </div>
     </form>
 

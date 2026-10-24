@@ -396,6 +396,70 @@ async function setAutonomy(mode) {
 }
 
 // -------------------------------------------------------------------------
+// Popover open/close — one contract shared by the three menus (Saved
+// workflows, Chat history, Site rules). Opening marks the trigger as expanded,
+// puts focus on the first control inside the menu, and starts watching the
+// document for Escape and an outside click. Closing hands all four back: the
+// menu hidden, aria-expanded false, the two listeners gone, and for Escape,
+// focus back on the trigger. The last one is the point: a menu that closes by
+// leaving focus on document.body puts a keyboard user at the top of the tab
+// order, with the menu now invisible and no way to get back to it.
+//
+// The History menu already kept this contract, so it is extracted here — the
+// three menus cannot drift, and an Escape fix lands once. The listener pair is
+// stored per menu, so the exact function added at open is the one removed at
+// close: opening the same menu twice cannot stack two Escape handlers, and
+// closing a menu that is already closed does nothing.
+// -------------------------------------------------------------------------
+const menuHooks = new Map(); // menu element -> the pair added to the document at open
+
+function closeMenu(menuEl, triggerEl, returnFocus) {
+  if (menuEl.hidden) return;
+  const hooks = menuHooks.get(menuEl);
+  menuEl.hidden = true;
+  triggerEl.setAttribute("aria-expanded", "false");
+  document.removeEventListener("mousedown", hooks.outside, true);
+  document.removeEventListener("keydown", hooks.escape);
+  // Escape hands focus back to the trigger. An outside click and a focusout do
+  // not: the click that closed the menu is the user saying where they want to be.
+  if (returnFocus) triggerEl.focus();
+}
+
+function openMenu(menuEl, triggerEl, focusEl) {
+  let hooks = menuHooks.get(menuEl);
+  if (!hooks) {
+    hooks = {
+      outside: (e) => {
+        if (menuEl.contains(e.target) || triggerEl.contains(e.target)) return;
+        closeMenu(menuEl, triggerEl, false);
+      },
+      escape: (e) => {
+        // A rename field or an inline confirm handles its own Escape and stops it
+        // before it reaches the document, so only an unhandled Escape closes the menu.
+        if (e.key !== "Escape" || e.defaultPrevented) return;
+        e.preventDefault();
+        closeMenu(menuEl, triggerEl, true);
+      },
+    };
+    menuHooks.set(menuEl, hooks);
+  }
+  menuEl.hidden = false;
+  triggerEl.setAttribute("aria-expanded", "true");
+  document.addEventListener("mousedown", hooks.outside, true);
+  document.addEventListener("keydown", hooks.escape);
+  // A caller names the row to land on (History opens on the chat that is open
+  // now); with no preference, focus goes to the first control inside.
+  (focusEl || firstFocusable(menuEl)).focus();
+}
+
+function firstFocusable(menuEl) {
+  // A disabled button cannot take keyboard focus, so it is skipped. When there is
+  // no control inside — Saved workflows is a list of plain divs — the dialog is
+  // the target, which is why each menu carries tabindex="-1".
+  return menuEl.querySelector("button:not(:disabled), input") || menuEl;
+}
+
+// -------------------------------------------------------------------------
 // Site chip — shows the current site + its rule, and is the quick toggle for
 // trusting/blocking a site without opening Settings.
 // -------------------------------------------------------------------------
@@ -428,22 +492,16 @@ async function refreshContextHint() {
   }
 }
 
-function toggleSiteMenu() {
+async function toggleSiteMenu() {
   if (!els.siteMenu.hidden) return hideSiteMenu();
   if (!currentSiteOrigin) return;
-  renderSiteMenu();
-  document.addEventListener("mousedown", siteMenuOutside, true);
-}
-
-function siteMenuOutside(e) {
-  if (els.siteMenu.contains(e.target) || els.contextHint.contains(e.target)) return;
-  hideSiteMenu();
+  await renderSiteMenu();
+  openMenu(els.siteMenu, els.contextHint);
 }
 
 function hideSiteMenu() {
-  els.siteMenu.hidden = true;
-  els.siteMenu.innerHTML = "";
-  document.removeEventListener("mousedown", siteMenuOutside, true);
+  closeMenu(els.siteMenu, els.contextHint, false);
+  els.siteMenu.innerHTML = ""; // the rows are rebuilt from storage on the next open
 }
 
 async function renderSiteMenu() {
@@ -466,7 +524,8 @@ async function renderSiteMenu() {
       refreshContextHint();
     }),
   );
-  els.siteMenu.hidden = false;
+  // openMenu shows the menu and focuses the first rule, so the rows are in the DOM
+  // before focus is asked for.
 }
 
 // Persist a per-site rule without touching the rest of the config (mirrors the
@@ -1260,16 +1319,11 @@ async function restorePendingWorkflow() {
   }
 }
 
-function toggleWorkflowsMenu() {
+async function toggleWorkflowsMenu() {
   if (!els.wfMenu.hidden) return hideWorkflowsMenu();
   hideHistoryMenu(false);
-  loadWorkflows().then(renderWorkflowsMenu);
-  document.addEventListener("mousedown", wfOutside, true);
-}
-
-function wfOutside(e) {
-  if (els.wfMenu.contains(e.target) || e.target === els.workflowsBtn) return;
-  hideWorkflowsMenu();
+  renderWorkflowsMenu(await loadWorkflows());
+  openMenu(els.wfMenu, els.workflowsBtn);
 }
 
 function renderWorkflowsMenu(wfs) {
@@ -1288,12 +1342,10 @@ function renderWorkflowsMenu(wfs) {
   }
   // Hangs just below the top bar, whose height changes with the model line.
   els.wfMenu.style.top = `${Math.round(document.querySelector(".topbar").getBoundingClientRect().bottom) + 4}px`;
-  els.wfMenu.hidden = false;
 }
 
 function hideWorkflowsMenu() {
-  els.wfMenu.hidden = true;
-  document.removeEventListener("mousedown", wfOutside, true);
+  closeMenu(els.wfMenu, els.workflowsBtn, false);
 }
 
 function replayWorkflow(wf) {
@@ -1365,35 +1417,19 @@ async function toggleHistoryMenu() {
   hideWorkflowsMenu();
   histStatus("");
   renderHistoryMenu(await listSessions());
+  // Hangs just below the top bar, whose height changes with the model line.
   els.histMenu.style.top = `${Math.round(document.querySelector(".topbar").getBoundingClientRect().bottom) + 4}px`;
-  els.histMenu.hidden = false;
-  els.historyBtn.setAttribute("aria-expanded", "true");
-  document.addEventListener("mousedown", histOutside, true);
-  document.addEventListener("keydown", histEscape);
+  // A reader lands on the chat that is open now, not the newest row: the shared
+  // helper takes this as the place to focus, and falls back to the first control.
   const current = els.histBody.querySelector(".hist-item.current .hist-open:not(:disabled)");
-  (current || els.histBody.querySelector(".hist-open:not(:disabled)") || firstHistFocusable()).focus();
+  openMenu(els.histMenu, els.historyBtn, current);
 }
 
-function histOutside(e) {
-  if (els.histMenu.contains(e.target) || els.historyBtn.contains(e.target)) return;
-  hideHistoryMenu(false);
-}
-
-// Esc from anywhere while it is open; the rename field and the inline confirms
-// handle their own Esc and stop it before it gets here.
-function histEscape(e) {
-  if (e.key !== "Escape" || e.defaultPrevented) return;
-  e.preventDefault();
-  hideHistoryMenu(true);
-}
-
+// The adapter for the paths inside the menu — a row click, a rename, an
+// inline confirm, a focusout. Focus has already gone where the user put it, so
+// Escape's return-to-trigger rule does not apply here.
 function hideHistoryMenu(returnFocus) {
-  if (els.histMenu.hidden) return;
-  els.histMenu.hidden = true;
-  els.historyBtn.setAttribute("aria-expanded", "false");
-  document.removeEventListener("mousedown", histOutside, true);
-  document.removeEventListener("keydown", histEscape);
-  if (returnFocus) els.historyBtn.focus();
+  closeMenu(els.histMenu, els.historyBtn, returnFocus);
 }
 
 function histStatus(text) {
@@ -1406,7 +1442,7 @@ async function listSessions() {
 }
 
 function firstHistFocusable() {
-  return els.histMenu.querySelector("button:not(:disabled), input") || els.histMenu;
+  return firstFocusable(els.histMenu);
 }
 
 // Focus a control in a row by chat id (or, with no id, a control outside the
