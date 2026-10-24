@@ -122,11 +122,17 @@
             </div>
           </details>
 
-          <div class="add-row">
-            <select id="preset-select">
-              <option value="">Add a provider…</option>
-            </select>
-            <button id="add-provider" class="btn">Add</button>
+          <!-- The preset picker is a field a reader can reach, so it needs a
+               name: a plain .field keeps the label above the row, exactly the
+               rhythm of every other field on the page. -->
+          <div class="field">
+            <label for="preset-select">Provider preset</label>
+            <div class="add-row">
+              <select id="preset-select">
+                <option value="">Add a provider…</option>
+              </select>
+              <button id="add-provider" class="btn">Add</button>
+            </div>
           </div>
 
           <div id="provider-list" class="provider-list"></div>
@@ -138,11 +144,15 @@
           <h2>Behavior</h2>
 
           <div class="field">
-            <label>Autonomy</label>
+            <!-- A group of radios can't be named by one label[for]: one for=
+                 names exactly one control. Each radio names itself with its own
+                 wrapping label, and aria-labelledby adds the group's name, so a
+                 reader says "Autonomy, Plan first, then act on approval". -->
+            <label id="autonomy-label">Autonomy</label>
             <div class="radio-row">
-              <label class="radio"><input type="radio" name="autonomy" value="plan" /> Plan first, then act on approval <span class="chip good">safest</span></label>
-              <label class="radio"><input type="radio" name="autonomy" value="ask" /> Ask before acting on a new site <span class="chip good">safer</span></label>
-              <label class="radio"><input type="radio" name="autonomy" value="auto" /> Act without asking on allowed sites <span class="chip warn">faster</span></label>
+              <label class="radio" id="autonomy-plan"><input type="radio" name="autonomy" value="plan" aria-labelledby="autonomy-label autonomy-plan" /> Plan first, then act on approval <span class="chip good">safest</span></label>
+              <label class="radio" id="autonomy-ask"><input type="radio" name="autonomy" value="ask" aria-labelledby="autonomy-label autonomy-ask" /> Ask before acting on a new site <span class="chip good">safer</span></label>
+              <label class="radio" id="autonomy-auto"><input type="radio" name="autonomy" value="auto" aria-labelledby="autonomy-label autonomy-auto" /> Act without asking on allowed sites <span class="chip warn">faster</span></label>
             </div>
             <p class="hint">Sensitive sites and purchase or delete actions always confirm.</p>
             <details class="more">
@@ -311,10 +321,10 @@
             </div>
 
             <div class="field">
-              <label>Key source</label>
+              <label id="key-source-label">Key source</label>
               <div class="radio-row">
-                <label class="radio"><input type="radio" name="dec-source" value="openrouter" /> Use one of my OpenRouter providers' keys</label>
-                <label class="radio"><input type="radio" name="dec-source" value="typesafe" /> Use a TypeSafe key</label>
+                <label class="radio" id="dec-source-openrouter"><input type="radio" name="dec-source" value="openrouter" aria-labelledby="key-source-label dec-source-openrouter" /> Use one of my OpenRouter providers' keys</label>
+                <label class="radio" id="dec-source-typesafe"><input type="radio" name="dec-source" value="typesafe" aria-labelledby="key-source-label dec-source-typesafe" /> Use a TypeSafe key</label>
               </div>
             </div>
 
@@ -352,20 +362,20 @@
             </div>
 
             <div class="field">
-              <label>Checks</label>
-              <label class="radio"><input type="checkbox" id="dec-f-action" /> Check risky actions before acting</label>
+              <label id="checks-label">Checks</label>
+              <label class="radio" id="checks-action"><input type="checkbox" id="dec-f-action" aria-labelledby="checks-label checks-action" /> Check risky actions before acting</label>
               <p class="hint">Sends this turn's instruction. Keep passwords and card numbers out of the chat.</p>
               <details class="more">
                 <summary>Learn more</summary>
                 <p class="hint">Asks you first when a click/type/navigate looks like a purchase, payment, deletion or send, even in Auto. Sends your instruction for the current turn (not what gets typed into the page), so don't paste passwords or card numbers into the chat while this is on — an instruction that looks like it carries one is withheld. Unattended scheduled runs can't ask, so a confirmation there stops the task instead.</p>
               </details>
-              <label class="radio"><input type="checkbox" id="dec-f-injection" /> Classify page text for hidden instructions</label>
+              <label class="radio" id="checks-injection"><input type="checkbox" id="dec-f-injection" aria-labelledby="checks-label checks-injection" /> Classify page text for hidden instructions</label>
               <p class="hint">Sends up to 60,000 characters of the page, never on bank, payment or crypto sites.</p>
               <details class="more">
                 <summary>Learn more</summary>
                 <p class="hint">Adds a smarter prompt-injection check on top of the built-in one. Sends up to 60,000 characters of the page just read — never on a sensitive site (banks, payment processors, crypto), where only the built-in check runs.</p>
               </details>
-              <label class="radio"><input type="checkbox" id="dec-f-change" /> Scheduled tasks: only notify when the result changed</label>
+              <label class="radio" id="checks-change"><input type="checkbox" id="dec-f-change" aria-labelledby="checks-label checks-change" /> Scheduled tasks: only notify when the result changed</label>
               <p class="hint">Compares the model's own wording, so a reworded answer can count as a change.</p>
               <details class="more">
                 <summary>Learn more</summary>
@@ -404,16 +414,19 @@
           <button class="link-btn delete-provider">Remove</button>
         </div>
         <div class="provider-body">
+          <!-- These labels carry no for= here: every card gets its own ids, built
+               from the record, so for= is wired at the clone site in options.js
+               (see renderProviders) from this node, not from a selector string. -->
           <div class="field">
-            <label>Base URL</label>
+            <label class="base-url-label">Base URL</label>
             <input type="text" class="base-url" placeholder="https://…/v1" />
           </div>
           <div class="field">
-            <label>API key <a class="key-link" target="_blank" rel="noopener" hidden>get one ↗</a></label>
+            <label class="api-key-label">API key <a class="key-link" target="_blank" rel="noopener" hidden>get one ↗</a></label>
             <input type="password" class="api-key" placeholder="Paste your API key (leave blank for local models)" autocomplete="off" />
           </div>
           <div class="field">
-            <label>Model</label>
+            <label class="model-label">Model</label>
             <div class="model-row">
               <input type="text" class="model" list="" placeholder="model id" />
               <button class="btn btn-ghost small fetch-models">Fetch models</button>

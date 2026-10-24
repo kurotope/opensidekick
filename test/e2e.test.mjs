@@ -991,6 +991,198 @@ async function main() {
       await sPage.close().catch(() => {});
     }
 
+    // --- Options page: label association. Every field a reader can reach needs
+    // a name, every label[for] has to resolve, ids have to be unique, and an id
+    // built from a stored record has to survive a hostile record. Fresh page,
+    // same pattern as the venice block. Rows added, hostile text and a hostile
+    // provider id written through chrome.storage.local, then the seed restored
+    // so the suites below see the seeded config. ---
+    const HOSTILE_ID = 'a"b<c>';
+    const HOSTILE_TEXT = "<img src=x onerror=alert(1)>";
+    const auditLabels = (page) =>
+      page.evaluate(() => {
+        const fields = [...document.querySelectorAll("input, textarea, select")];
+        const forLabels = [...document.querySelectorAll("label[for]")];
+        // A field is named by a label[for] on its id, a label that wraps it, or
+        // an aria-labelledby that resolves to text — the three ways a name exists.
+        const named = (f) =>
+          (f.id && forLabels.some((l) => l.htmlFor === f.id)) ||
+          !!f.closest("label") ||
+          (f.getAttribute("aria-labelledby") || "").split(/\s+/).some((i) => (document.getElementById(i) || { textContent: "" }).textContent.trim());
+        const seen = {};
+        for (const el of document.querySelectorAll("[id]")) seen[el.id] = (seen[el.id] || 0) + 1;
+        return {
+          fields: fields.length,
+          labels: forLabels.length,
+          unnamed: fields.filter((f) => !named(f)).map((f) => `${f.tagName.toLowerCase()}${f.id ? "#" + f.id : "." + (f.className || "")}`),
+          unresolved: forLabels.filter((l) => !document.getElementById(l.htmlFor)).map((l) => l.htmlFor),
+          dupIds: Object.keys(seen).filter((id) => seen[id] > 1),
+        };
+      });
+    const auditRows = (page) =>
+      page.evaluate(() => {
+        const one = (listSel, rowSel, name) => {
+          const r = document.querySelector(`${listSel} ${rowSel}`);
+          if (!r) return { name, missing: true };
+          const fields = [...r.querySelectorAll("input, textarea, select")];
+          const forLabels = [...document.querySelectorAll("label[for]")];
+          const ids = fields.map((f) => f.id);
+          return {
+            name,
+            fields: fields.length,
+            unnamed: fields
+              .filter((f) => !((f.id && forLabels.some((l) => l.htmlFor === f.id)) || f.closest("label") || f.getAttribute("aria-labelledby")))
+              .map((f) => f.className || f.tagName),
+            emptyIds: ids.filter((id) => !id),
+            dupInRow: ids.filter((id, i) => ids.indexOf(id) !== i),
+            unresolved: [...r.querySelectorAll("label[for]")].filter((l) => !document.getElementById(l.htmlFor)).map((l) => l.htmlFor),
+          };
+        };
+        return [
+          one("#prompt-list", ".prompt-item", "prompt"),
+          one("#sched-list", ".sched-item", "sched"),
+          one("#mcp-list", ".sched-item", "mcp"),
+          one("#wf-list", ".prompt-item", "wf"),
+        ];
+      });
+    const lPage = await context.newPage();
+    try {
+      await lPage.goto(`chrome-extension://${extId}/src/options/options.html`, { waitUntil: "load" });
+      await lPage.waitForSelector("#provider-list .provider", { state: "attached", timeout: 5000 });
+      const fresh = await auditLabels(lPage);
+      check(fresh.unresolved.length === 0, `options: every label[for] targets an existing element (${fresh.labels} labels, unresolved ${JSON.stringify(fresh.unresolved)})`);
+      check(fresh.unnamed.length === 0, `options: every field has an associated label (${fresh.fields} fields, ${fresh.unnamed.length} unnamed: ${fresh.unnamed.join(" ")})`);
+      const mockCard = await lPage.evaluate(() => {
+        const card = document.querySelector('.provider[data-id="mock"]');
+        const out = {};
+        for (const cls of ["model", "base-url", "api-key"]) {
+          const f = card.querySelector("." + cls);
+          out[cls] = { id: f.id, resolves: !!document.getElementById(f.id), labelled: [...card.querySelectorAll("label")].some((l) => l.htmlFor === f.id) };
+        }
+        return out;
+      });
+      check(
+        ["model", "base-url", "api-key"].every((c) => mockCard[c].id === `${c}-mock` && mockCard[c].resolves && mockCard[c].labelled),
+        `options: provider card fields are labelled (got ${JSON.stringify(mockCard)})`,
+      );
+
+      // The added card is the venice flow's card, so its ids come from a fresh
+      // uuid: they must not repeat the seeded card's ids anywhere in the page.
+      await lPage.selectOption("#preset-select", "venice");
+      await lPage.click("#add-provider");
+      await lPage.waitForFunction(() => document.querySelectorAll(".provider").length === 2, null, { timeout: 5000 });
+      const twoCards = await auditLabels(lPage);
+      check(
+        twoCards.dupIds.length === 0 && twoCards.unresolved.length === 0 && twoCards.unnamed.length === 0,
+        `options: ids unique across the seeded and added provider card (${twoCards.fields} fields, dup ${JSON.stringify(twoCards.dupIds)}, unnamed ${twoCards.unnamed.length})`,
+      );
+      const newId = await lPage.evaluate(() => document.querySelectorAll(".provider")[1].dataset.id);
+      // Remove it the way the venice block does — poll storage, then click — so
+      // the card is settled before the next audit.
+      await lPage.waitForFunction(
+        ([key, url]) => chrome.storage.local.get(key).then((r) => (r[key]?.providers || []).some((p) => p.baseUrl === url)),
+        [STORAGE_KEY, VENICE_BASE],
+        { timeout: 5000 },
+      );
+      await lPage.evaluate((id) => document.querySelector(`.provider[data-id="${id}"]`).querySelector(".delete-provider").click(), newId);
+      await lPage.waitForFunction(() => document.querySelectorAll(".provider").length === 1, null, { timeout: 5000 });
+
+      // The rows a user adds from this page: prompt, scheduled task, MCP server.
+      // Their sections start closed (openExtra opens a section only once it holds
+      // something), so open them as the reader would before clicking Add.
+      await lPage.evaluate(() => {
+        for (const id of ["sec-prompts", "sec-sched", "sec-mcp"]) document.getElementById(id).open = true;
+      });
+      await lPage.click("#add-prompt");
+      await lPage.click("#add-sched");
+      await lPage.click("#add-mcp");
+      await lPage.waitForFunction(
+        () =>
+          document.querySelectorAll("#prompt-list .prompt-item").length === 1 &&
+          document.querySelectorAll("#sched-list .sched-item").length === 1 &&
+          document.querySelectorAll("#mcp-list .sched-item").length === 1,
+        null,
+        { timeout: 5000 },
+      );
+      const rows = await auditRows(lPage);
+      const withRows = await auditLabels(lPage);
+      const rowsClean = rows.slice(0, 3).every((r) => !r.missing && r.unnamed.length === 0 && r.emptyIds.length === 0 && r.dupInRow.length === 0 && r.unresolved.length === 0);
+      check(
+        rowsClean && withRows.dupIds.length === 0,
+        `options: sched, MCP, and prompt rows have labelled fields (got ${JSON.stringify(rows.slice(0, 3))}, page dup ${JSON.stringify(withRows.dupIds)})`,
+      );
+
+      // Hostile stored data: loadConfig copies providers, prompts and workflows
+      // verbatim, so the page is the only place a hostile id is made safe.
+      await lPage.evaluate(
+        async ([key, cfg, hostileId, hostileText]) => {
+          await chrome.storage.local.set({
+            [key]: {
+              ...cfg,
+              providers: [...cfg.providers, { id: hostileId, name: hostileText, type: "openai", baseUrl: "", apiKey: "", model: "", models: [] }],
+              prompts: [{ id: "hp1", command: hostileText, text: hostileText }],
+              workflows: [{ id: "hw1", name: "Hostile", steps: [{ description: hostileText }], startUrl: "" }],
+              scheduledTasks: [],
+              mcpServers: [],
+            },
+          });
+        },
+        [STORAGE_KEY, config, HOSTILE_ID, HOSTILE_TEXT],
+      );
+      await lPage.reload({ waitUntil: "load" });
+      await lPage.waitForFunction(() => document.querySelectorAll(".provider").length === 2, null, { timeout: 5000 });
+      const hostile = await lPage.evaluate(
+        (text) => {
+          const card = [...document.querySelectorAll(".provider")].find((c) => c.querySelector(".pname").textContent === text);
+          const prow = document.querySelector("#prompt-list .prompt-item");
+          const wrow = document.querySelector("#wf-list .prompt-item");
+          const forLabels = [...document.querySelectorAll("label[for]")];
+          // The label must point at THIS field, not at the first element that
+          // happens to carry the id.
+          const resolves = (f) => !!f.id && document.getElementById(f.id) === f && forLabels.some((l) => l.htmlFor === f.id);
+          return {
+            pname: card ? card.querySelector(".pname").textContent : "",
+            cardFields: card ? [card.querySelector(".model"), card.querySelector(".base-url"), card.querySelector(".api-key")].map((f) => ({ id: f.id, resolves: resolves(f), safe: /^[a-z0-9_-]+$/.test(f.id) })) : [],
+            cardImgs: card ? card.querySelectorAll("img").length : -1,
+            cmd: prow ? prow.querySelector(".prompt-cmd").value : "",
+            prowResolves: prow ? [prow.querySelector(".prompt-cmd"), prow.querySelector(".prompt-body")].map(resolves) : [],
+            prowImgs: prow ? prow.querySelectorAll("img").length : -1,
+            wfStep: wrow ? wrow.querySelector(".wf-steps li").textContent : "",
+            wfNameResolves: wrow ? resolves(wrow.querySelector(".wf-name")) : false,
+            wfImgs: wrow ? wrow.querySelectorAll("img").length : -1,
+          };
+        },
+        HOSTILE_TEXT,
+      );
+      const hostilePage = await auditLabels(lPage);
+      check(
+        hostile.cardFields.length === 3 && hostile.cardFields.every((f) => f.resolves && f.safe) && hostilePage.dupIds.length === 0,
+        `options: a stored provider id with a quote keeps its labels resolving (got ${JSON.stringify(hostile.cardFields)}, page dup ${JSON.stringify(hostilePage.dupIds)})`,
+      );
+      check(
+        hostile.pname === HOSTILE_TEXT && hostile.cardImgs === 0 && hostile.cmd === HOSTILE_TEXT && hostile.prowImgs === 0 && hostile.prowResolves.every(Boolean) && hostilePage.unnamed.length === 0,
+        `options: hostile text in a provider name and prompt row stays text (name "${hostile.pname}", prompt "${hostile.cmd}", imgs ${hostile.cardImgs}/${hostile.prowImgs}, unnamed ${hostilePage.unnamed.length})`,
+      );
+      check(
+        hostile.wfStep === HOSTILE_TEXT && hostile.wfImgs === 0 && hostile.wfNameResolves,
+        `options: a hostile workflow step renders as text and its name is labelled (got "${hostile.wfStep}", imgs ${hostile.wfImgs}, labelled ${hostile.wfNameResolves})`,
+      );
+
+      // Put the seeded config back for every suite below this one.
+      await lPage.evaluate(([key, cfg]) => chrome.storage.local.set({ [key]: cfg }), [STORAGE_KEY, config]);
+      await lPage.reload({ waitUntil: "load" });
+      await lPage.waitForSelector("#provider-list .provider", { state: "attached", timeout: 5000 });
+      const restored = await auditLabels(lPage);
+      check(
+        restored.unresolved.length === 0 && restored.unnamed.length === 0 && restored.dupIds.length === 0 && restored.fields === fresh.fields,
+        `options: the restored seed keeps every field named (${restored.fields} fields, unnamed ${restored.unnamed.length}, dup ${JSON.stringify(restored.dupIds)})`,
+      );
+    } catch (e) {
+      check(false, `options: label association flow threw: ${e.message}`);
+    } finally {
+      await lPage.close().catch(() => {});
+    }
+
     // Collect agent events, and auto-respond to permission prompts (recording
     // them), in the options page context.
     await optPage.evaluate(([agentEventType, permReq, permResp]) => {

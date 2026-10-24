@@ -51,6 +51,30 @@ const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
 // after an edit can't fight a user who just folded it away.
 const autoOpened = new Set();
 
+// A label's `for` and the field's `id` come from stored records: loadConfig
+// copies providers, prompts, tasks and servers verbatim, with no validation, so
+// a record id carrying a quote, a `<` or a space would build an id that
+// document.getElementById can never match and a for= that resolves to nothing.
+// Keep only the characters an id may hold. The sanitised value is the one that
+// goes into the page, and it never goes into a selector string.
+const safeId = (raw) => String(raw ?? "").toLowerCase().replace(/[^a-z0-9_-]/g, "");
+
+// Ids are unique across the page: seed the pool with the ids already in the DOM
+// (each list re-renders only its own rows), and take the first value that is
+// free, so a config that stores the same id twice — loadConfig does not dedupe —
+// does not make two rows share a name. getElementById takes the first match, so
+// sharing is the silent failure this prevents.
+function makeIdPool() {
+  const taken = new Set(Array.from(document.querySelectorAll("[id]"), (el) => el.id));
+  return (base) => {
+    const stem = safeId(base) || "field";
+    let id = stem;
+    for (let n = 2; taken.has(id); n++) id = `${stem}-${n}`;
+    taken.add(id);
+    return id;
+  };
+}
+
 init();
 
 async function init() {
@@ -181,6 +205,7 @@ function renderProviders() {
   noProviders.hidden = config.providers.length > 0;
 
   const tpl = $("#provider-template");
+  const newId = makeIdPool();
   for (const provider of config.providers) {
     const node = tpl.content.firstElementChild.cloneNode(true);
     node.dataset.id = provider.id;
@@ -193,7 +218,13 @@ function renderProviders() {
     radio.checked = active;
     radio.addEventListener("change", () => setActive(provider.id));
 
+    // The label is wired from this node, never from a rebuilt data-id selector:
+    // a provider id holding a quote breaks that selector, and the pair has to be
+    // written from one value so the for= can't drift from the id.
+    const baseId = newId(`base-url-${provider.id}`);
     const baseUrl = node.querySelector(".base-url");
+    baseUrl.id = baseId;
+    node.querySelector(".base-url-label").htmlFor = baseId;
     baseUrl.value = provider.baseUrl;
     baseUrl.addEventListener("change", () => {
       provider.baseUrl = baseUrl.value.trim();
@@ -207,7 +238,10 @@ function renderProviders() {
       scheduleAutoTest(provider, node, { immediate: true });
     });
 
+    const keyId = newId(`api-key-${provider.id}`);
     const keyInput = node.querySelector(".api-key");
+    keyInput.id = keyId;
+    node.querySelector(".api-key-label").htmlFor = keyId;
     keyInput.value = provider.apiKey || "";
     keyInput.addEventListener("change", () => {
       provider.apiKey = keyInput.value.trim();
@@ -224,7 +258,14 @@ function renderProviders() {
 
     const modelInput = node.querySelector(".model");
     const datalist = node.querySelector("datalist");
-    const listId = "models-" + provider.id;
+    const modelId = newId(`model-${provider.id}`);
+    // The datalist id used to be "models-" + provider.id: same record, same
+    // unsanitised value, and a list attribute pointing at nothing for a record
+    // id Chrome cannot match. Both ids come from the pool, so no two cards share
+    // a model field or a datalist.
+    const listId = newId(`models-${provider.id}`);
+    modelInput.id = modelId;
+    node.querySelector(".model-label").htmlFor = modelId;
     datalist.id = listId;
     modelInput.setAttribute("list", listId);
     modelInput.value = provider.model || "";
@@ -914,16 +955,28 @@ function renderPrompts() {
   list.innerHTML = "";
   $("#no-prompts").hidden = (config.prompts || []).length > 0;
   openExtra("sec-prompts", (config.prompts || []).length > 0);
+  const newId = makeIdPool();
   for (const p of config.prompts) {
+    // Each row gets its own ids, sanitised first: the value goes into innerHTML
+    // as an attribute, so a record id carrying a quote or a `<` has to be safe
+    // before it is interpolated. The label text is static — user text stays in
+    // .value, never in a template literal.
+    const cmdId = newId(`prompt-cmd-${p.id}`);
+    const bodyId = newId(`prompt-body-${p.id}`);
     const row = document.createElement("div");
     row.className = "prompt-item";
     row.innerHTML = `
-      <div class="prompt-head">
-        <span class="prompt-cmd-prefix">/</span>
-        <input class="prompt-cmd" placeholder="command" />
-        <button class="link-btn">Remove</button>
+      <div class="field">
+        <label for="${cmdId}">Command</label>
+        <div class="prompt-head">
+          <span class="prompt-cmd-prefix">/</span>
+          <input class="prompt-cmd" id="${cmdId}" placeholder="command" />
+          <button class="link-btn">Remove</button>
+        </div>
       </div>
-      <textarea class="prompt-body" placeholder="The prompt text this command inserts…"></textarea>`;
+      <div class="field">
+        <label for="${bodyId}">Prompt text</label>
+        <textarea class="prompt-body" id="${bodyId}" placeholder="The prompt text this command inserts…"></textarea>`;
     const cmd = row.querySelector(".prompt-cmd");
     const body = row.querySelector(".prompt-body");
     cmd.value = p.command || "";
@@ -961,20 +1014,28 @@ function renderScheduled() {
   list.innerHTML = "";
   $("#no-sched").hidden = (config.scheduledTasks || []).length > 0;
   openExtra("sec-sched", (config.scheduledTasks || []).length > 0);
+  const newId = makeIdPool();
   for (const t of config.scheduledTasks) {
+    const ids = {
+      name: newId(`s-name-${t.id}`),
+      prompt: newId(`s-prompt-${t.id}`),
+      url: newId(`s-url-${t.id}`),
+      interval: newId(`s-interval-${t.id}`),
+      enabled: newId(`s-enabled-${t.id}`),
+    };
     const row = document.createElement("div");
     row.className = "sched-item";
     row.innerHTML = `
-      <div class="field"><label>Name</label><input class="s-name" placeholder="e.g. Morning news digest" /></div>
-      <div class="field"><label>Prompt</label><textarea class="s-prompt" placeholder="What should it do each time?"></textarea></div>
-      <div class="field"><label>Start URL (optional)</label><input class="s-url" placeholder="leave blank to use the current tab" /></div>
+      <div class="field"><label for="${ids.name}">Name</label><input class="s-name" id="${ids.name}" placeholder="e.g. Morning news digest" /></div>
+      <div class="field"><label for="${ids.prompt}">Prompt</label><textarea class="s-prompt" id="${ids.prompt}" placeholder="What should it do each time?"></textarea></div>
+      <div class="field"><label for="${ids.url}">Start URL (optional)</label><input class="s-url" id="${ids.url}" placeholder="leave blank to use the current tab" /></div>
       <div class="grid2">
         <div>
-          <label>Run every … minutes</label>
-          <input type="number" class="s-interval" min="1" />
+          <label for="${ids.interval}">Run every … minutes</label>
+          <input type="number" class="s-interval" id="${ids.interval}" min="1" />
           <div class="interval-hint">60 = hourly · 360 = every 6h · 1440 = daily · 10080 = weekly</div>
         </div>
-        <div><label>&nbsp;</label><label class="enabled-label"><input type="checkbox" class="s-enabled" /> Enabled</label></div>
+        <div><label>&nbsp;</label><label class="enabled-label"><input type="checkbox" class="s-enabled" id="${ids.enabled}" /> Enabled</label></div>
       </div>
       <div class="sched-actions">
         <button class="btn btn-ghost small s-run">Run now</button>
@@ -1032,14 +1093,19 @@ function renderWorkflows() {
   list.innerHTML = "";
   $("#no-wf").hidden = (config.workflows || []).length > 0;
   openExtra("sec-workflows", (config.workflows || []).length > 0);
+  const newId = makeIdPool();
   for (const w of config.workflows) {
     const row = document.createElement("div");
     row.className = "prompt-item";
     const steps = (w.steps || []).map((s) => `<li>${escapeHtml(s.description || String(s))}</li>`).join("");
+    const nameId = newId(`wf-name-${w.id}`);
     row.innerHTML = `
-      <div class="prompt-head">
-        <input class="prompt-cmd wf-name" placeholder="Workflow name" />
-        <button class="link-btn">Remove</button>
+      <div class="field">
+        <label for="${nameId}">Workflow name</label>
+        <div class="prompt-head">
+          <input class="prompt-cmd wf-name" id="${nameId}" placeholder="Workflow name" />
+          <button class="link-btn">Remove</button>
+        </div>
       </div>
       ${w.startUrl ? `<div class="interval-hint">Starts at ${escapeHtml(w.startUrl)}</div>` : ""}
       <ol class="wf-steps">${steps}</ol>`;
@@ -1067,15 +1133,22 @@ function renderMcp() {
   list.innerHTML = "";
   $("#no-mcp").hidden = (config.mcpServers || []).length > 0;
   openExtra("sec-mcp", (config.mcpServers || []).length > 0);
+  const newId = makeIdPool();
   for (const m of config.mcpServers) {
+    const ids = {
+      name: newId(`m-name-${m.id}`),
+      url: newId(`m-url-${m.id}`),
+      token: newId(`m-token-${m.id}`),
+      enabled: newId(`m-enabled-${m.id}`),
+    };
     const row = document.createElement("div");
     row.className = "sched-item";
     row.innerHTML = `
-      <div class="field"><label>Name</label><input class="m-name" placeholder="e.g. github" /></div>
-      <div class="field"><label>Server URL</label><input class="m-url" placeholder="https://…/mcp" /></div>
-      <div class="field"><label>Auth token (optional)</label><input type="password" class="m-token" placeholder="Bearer token, if the server needs one" autocomplete="off" /></div>
+      <div class="field"><label for="${ids.name}">Name</label><input class="m-name" id="${ids.name}" placeholder="e.g. github" /></div>
+      <div class="field"><label for="${ids.url}">Server URL</label><input class="m-url" id="${ids.url}" placeholder="https://…/mcp" /></div>
+      <div class="field"><label for="${ids.token}">Auth token (optional)</label><input type="password" class="m-token" id="${ids.token}" placeholder="Bearer token, if the server needs one" autocomplete="off" /></div>
       <div class="sched-actions">
-        <label class="enabled-label"><input type="checkbox" class="m-enabled" /> Enabled</label>
+        <label class="enabled-label"><input type="checkbox" class="m-enabled" id="${ids.enabled}" /> Enabled</label>
         <button class="btn btn-ghost small m-test">Test</button>
         <button class="link-btn m-del">Remove</button>
       </div>
