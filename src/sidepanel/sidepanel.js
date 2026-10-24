@@ -127,17 +127,30 @@ async function init() {
   els.recordBtn.addEventListener("click", toggleRecording);
   els.workflowsBtn.addEventListener("click", toggleWorkflowsMenu);
   wireHistoryMenu();
+  // One mousedown/keydown pair for all three menus, added once over the openMenus
+  // Map: an entry is an open menu, so with no entry the pair does nothing, and a
+  // rename field or an inline confirm stops its own Escape before it reaches the
+  // document, so only an unhandled Escape closes a menu.
+  document.addEventListener("mousedown", (e) => {
+    for (const [menu, trigger] of openMenus) {
+      if (!menu.contains(e.target) && !trigger.contains(e.target)) closeMenu(menu, trigger, false);
+    }
+  }, true);
+  document.addEventListener("keydown", (e) => {
+    if (!openMenus.size || e.key !== "Escape" || e.defaultPrevented) return;
+    e.preventDefault();
+    for (const [menu, trigger] of openMenus) closeMenu(menu, trigger, true);
+  });
   els.autonomy.querySelectorAll(".seg").forEach((btn) =>
     btn.addEventListener("click", () => setAutonomy(btn.dataset.mode)),
   );
   // Arrows rove the Approval group; Tab is left alone, so the group has an exit.
+  // The listener is on the group and roveSegs returns when focus is outside it.
   els.autonomy.addEventListener("keydown", (e) => {
-    if (e.key === "ArrowRight") {
+    const d = { ArrowRight: 1, ArrowLeft: -1 }[e.key];
+    if (d) {
       e.preventDefault();
-      roveSegs(1);
-    } else if (e.key === "ArrowLeft") {
-      e.preventDefault();
-      roveSegs(-1);
+      roveSegs(d);
     }
   });
 
@@ -424,67 +437,39 @@ async function setAutonomy(mode) {
 }
 
 // -------------------------------------------------------------------------
-// Popover open/close — one contract shared by the three menus (Saved
-// workflows, Chat history, Site rules). Opening marks the trigger as expanded,
-// puts focus on the first control inside the menu, and starts watching the
-// document for Escape and an outside click. Closing hands all four back: the
-// menu hidden, aria-expanded false, the two listeners gone, and for Escape,
-// focus back on the trigger. The last one is the point: a menu that closes by
-// leaving focus on document.body puts a keyboard user at the top of the tab
-// order, with the menu now invisible and no way to get back to it.
-//
-// The History menu already kept this contract, so it is extracted here — the
-// three menus cannot drift, and an Escape fix lands once. The listener pair is
-// stored per menu, so the exact function added at open is the one removed at
-// close: opening the same menu twice cannot stack two Escape handlers, and
-// closing a menu that is already closed does nothing.
+// Popover open/close, one contract for the three menus. The point is Escape: a menu
+// that closes by leaving focus on document.body strands a keyboard user at the top of
+// the tab order, with the menu invisible and no way back. The pair is added once at
+// init, over this Map, so opening a menu twice cannot stack two Escape handlers.
 // -------------------------------------------------------------------------
-const menuHooks = new Map(); // menu element -> the pair added to the document at open
+const openMenus = new Map(); // menu element -> the trigger that opened it
 
 function closeMenu(menuEl, triggerEl, returnFocus) {
-  if (menuEl.hidden) return;
-  const hooks = menuHooks.get(menuEl);
+  if (menuEl.hidden) return; // a row click, a focusout, and the outside click all reach it, on a menu another path may have closed first
+  openMenus.delete(menuEl);
   menuEl.hidden = true;
   triggerEl.setAttribute("aria-expanded", "false");
-  document.removeEventListener("mousedown", hooks.outside, true);
-  document.removeEventListener("keydown", hooks.escape);
   // Escape hands focus back to the trigger. An outside click and a focusout do
   // not: the click that closed the menu is the user saying where they want to be.
   if (returnFocus) triggerEl.focus();
 }
 
 function openMenu(menuEl, triggerEl, focusEl) {
-  let hooks = menuHooks.get(menuEl);
-  if (!hooks) {
-    hooks = {
-      outside: (e) => {
-        if (menuEl.contains(e.target) || triggerEl.contains(e.target)) return;
-        closeMenu(menuEl, triggerEl, false);
-      },
-      escape: (e) => {
-        // A rename field or an inline confirm handles its own Escape and stops it
-        // before it reaches the document, so only an unhandled Escape closes the menu.
-        if (e.key !== "Escape" || e.defaultPrevented) return;
-        e.preventDefault();
-        closeMenu(menuEl, triggerEl, true);
-      },
-    };
-    menuHooks.set(menuEl, hooks);
-  }
+  openMenus.set(menuEl, triggerEl);
   menuEl.hidden = false;
   triggerEl.setAttribute("aria-expanded", "true");
-  document.addEventListener("mousedown", hooks.outside, true);
-  document.addEventListener("keydown", hooks.escape);
   // A caller names the row to land on (History opens on the chat that is open
   // now); with no preference, focus goes to the first control inside.
   (focusEl || firstFocusable(menuEl)).focus();
 }
 
 function firstFocusable(menuEl) {
-  // A disabled button cannot take keyboard focus, so it is skipped. When there is
-  // no control inside — Saved workflows is a list of plain divs — the dialog is
-  // the target, which is why each menu carries tabindex="-1".
-  return menuEl.querySelector("button:not(:disabled), input") || menuEl;
+  // A disabled button cannot take keyboard focus, so it is skipped. A row drawn as
+  // a div only enters the tab order when it declares itself a button
+  // (role="button" + tabindex="0"), so that is what the dialog's first stop is.
+  // When there is no control inside at all, the dialog is the target, which is why
+  // each menu carries tabindex="-1".
+  return menuEl.querySelector('button:not(:disabled), input, [tabindex="0"]') || menuEl;
 }
 
 // -------------------------------------------------------------------------
@@ -529,7 +514,6 @@ async function toggleSiteMenu() {
 
 function hideSiteMenu() {
   closeMenu(els.siteMenu, els.contextHint, false);
-  els.siteMenu.innerHTML = ""; // the rows are rebuilt from storage on the next open
 }
 
 async function renderSiteMenu() {
@@ -963,17 +947,12 @@ function addNote(text, icon, action) {
 }
 
 // -------------------------------------------------------------------------
-// Card focus. A card lands at the end of the transcript, and grabbing focus is
-// the rude thing to do: mid-sentence, or mid-slash-menu, the keystrokes the user
-// is typing would land on a button. So focus is taken only when nothing else has
-// it (document.body) or focus already sits inside #messages, where the card is.
-// One rule serves both moments — the card's primary button on insertion, and the
-// note that replaces the buttons after a choice, which needs a landing point for
-// the tab order. The note carries tabindex="-1" as an attribute only: the shared
-// :focus-visible ring in ui.css draws it, so no new CSS is added.
+// Card focus: taken only when nothing else has it — body, or focus inside #messages,
+// where the card lands. Accepted risk: with nothing else focused, a card lands focus on
+// its primary button, so Enter at that instant grants the permission.
 // -------------------------------------------------------------------------
 function primaryButton(card) {
-  return card.querySelector("button.primary") || card.querySelector("button");
+  return card.querySelector("button.primary");
 }
 
 function choiceNote(text) {
@@ -985,7 +964,6 @@ function choiceNote(text) {
 }
 
 function focusIfTranscript(target) {
-  if (!target) return;
   const active = document.activeElement;
   if (active !== document.body && !els.messages.contains(active)) return;
   target.focus();
@@ -1355,15 +1333,14 @@ function showSaveWorkflow(steps, startUrl) {
   el.className = "perm-card";
   const list = steps.map((s) => `<li>${escapeHtml(s.description || String(s))}</li>`).join("");
   // Two of these cards can be open at once: the panel re-offers an unsaved
-  // recording when it opens, and a fresh Stop makes another. The name field is
-  // inside a card, so its id has to be per card — getElementById takes the first
-  // match, which is the other card's field. The value is read from this card's
-  // node, never through an id selector, so a shared id cannot misroute a name.
-  const nameId = `wf-name-${crypto.randomUUID()}`;
+  // recording when it opens, and a fresh Stop makes another. The field carries no
+  // id — nothing reads one, getElementById takes the first match, and the value
+  // comes from this card's node. Its name is the label that wraps it, the pattern
+  // the Autonomy radios and the Checks checkboxes already use.
   el.innerHTML = `
     <h3>Save this workflow?</h3>
     <ol class="plan-steps">${list}</ol>
-    <input id="${nameId}" class="wf-name-input" placeholder="Name (e.g. Book a meeting room)" />
+    <label>Workflow name<input class="wf-name-input" placeholder="Name (e.g. Book a meeting room)" /></label>
     <div class="perm-buttons"><button class="primary" data-save="1">Save</button><button data-save="0">Discard</button></div>`;
   const nameField = el.querySelector(".wf-name-input");
   el.querySelectorAll("button").forEach((btn) =>
@@ -1402,7 +1379,7 @@ async function restorePendingWorkflow() {
 
 async function toggleWorkflowsMenu() {
   if (!els.wfMenu.hidden) return hideWorkflowsMenu();
-  hideHistoryMenu(false);
+  hideHistoryMenu();
   renderWorkflowsMenu(await loadWorkflows());
   openMenu(els.wfMenu, els.workflowsBtn);
 }
@@ -1414,12 +1391,27 @@ function renderWorkflowsMenu(wfs) {
     els.wfMenu.innerHTML = wfs
       .map(
         (w, i) =>
-          `<div class="wf-item" data-i="${i}">${ic("play")}<span class="wf-name">${escapeHtml(w.name)}</span><span class="wf-count">${(w.steps || []).length} steps</span></div>`,
+          `<div class="wf-item" data-i="${i}" role="button" tabindex="0">${ic("play")}<span class="wf-name">${escapeHtml(w.name)}</span><span class="wf-count">${(w.steps || []).length} steps</span></div>`,
       )
       .join("");
-    els.wfMenu.querySelectorAll(".wf-item").forEach((el) =>
-      el.addEventListener("click", () => replayWorkflow(wfs[Number(el.dataset.i)])),
-    );
+    const rows = [...els.wfMenu.querySelectorAll(".wf-item")];
+    rows.forEach((el, i) => {
+      const run = () => replayWorkflow(wfs[Number(el.dataset.i)]);
+      el.addEventListener("click", run);
+      // role="button" without Enter/Space is the false promise threat 10 names: a
+      // reader hears a button it cannot press. Space is prevented so it activates
+      // the row instead of scrolling the panel. Tab is left alone — the rows are
+      // tab stops, and Tab has to be able to leave the dialog.
+      el.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" || e.key === " " || e.key === "Spacebar") {
+          e.preventDefault();
+          run();
+        } else if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+          e.preventDefault();
+          rows[(i + (e.key === "ArrowDown" ? 1 : -1) + rows.length) % rows.length].focus();
+        }
+      });
+    });
   }
   // Hangs just below the top bar, whose height changes with the model line.
   els.wfMenu.style.top = `${Math.round(document.querySelector(".topbar").getBoundingClientRect().bottom) + 4}px`;
@@ -1489,17 +1481,16 @@ function wireHistoryMenu() {
   // focus), which isn't the user leaving.
   els.histMenu.addEventListener("focusout", (e) => {
     const to = e.relatedTarget;
-    if (to && !els.histMenu.contains(to) && !els.historyBtn.contains(to)) hideHistoryMenu(false);
+    if (to && !els.histMenu.contains(to) && !els.historyBtn.contains(to)) hideHistoryMenu();
   });
 }
 
 async function toggleHistoryMenu() {
-  if (!els.histMenu.hidden) return hideHistoryMenu(false);
+  if (!els.histMenu.hidden) return hideHistoryMenu();
   hideWorkflowsMenu();
   histStatus("");
   renderHistoryMenu(await listSessions());
-  // Hangs just below the top bar, whose height changes with the model line.
-  els.histMenu.style.top = `${Math.round(document.querySelector(".topbar").getBoundingClientRect().bottom) + 4}px`;
+  els.histMenu.style.top = `${Math.round(document.querySelector(".topbar").getBoundingClientRect().bottom) + 4}px`; // same top-bar offset as the workflows menu
   // A reader lands on the chat that is open now, not the newest row: the shared
   // helper takes this as the place to focus, and falls back to the first control.
   const current = els.histBody.querySelector(".hist-item.current .hist-open:not(:disabled)");
@@ -1509,8 +1500,8 @@ async function toggleHistoryMenu() {
 // The adapter for the paths inside the menu — a row click, a rename, an
 // inline confirm, a focusout. Focus has already gone where the user put it, so
 // Escape's return-to-trigger rule does not apply here.
-function hideHistoryMenu(returnFocus) {
-  closeMenu(els.histMenu, els.historyBtn, returnFocus);
+function hideHistoryMenu() {
+  closeMenu(els.histMenu, els.historyBtn, false);
 }
 
 function histStatus(text) {
@@ -1522,16 +1513,12 @@ async function listSessions() {
   return res && res.ok ? res : null;
 }
 
-function firstHistFocusable() {
-  return firstFocusable(els.histMenu);
-}
-
 // Focus a control in a row by chat id (or, with no id, a control outside the
 // rows such as Clear all), or the first focusable when it is gone.
 function focusHist(id, cls = "hist-open") {
   const row = id ? [...els.histBody.querySelectorAll(".hist-item")].find((li) => li.dataset.id === id) : null;
   const el = id ? row && row.querySelector(`.${cls}`) : els.histBody.querySelector(`.${cls}`);
-  (el && !el.disabled ? el : firstHistFocusable()).focus();
+  (el && !el.disabled ? el : firstFocusable(els.histMenu)).focus();
 }
 
 // Re-lists and re-renders .hist-body only. A passive refresh (storage changed,
@@ -1615,7 +1602,7 @@ function onHistoryKeydown(e) {
 
 async function openSession(id) {
   if (els.histBody.querySelector(".hist-item.current")?.dataset.id === id) {
-    hideHistoryMenu(false); // already the open chat
+    hideHistoryMenu(); // already the open chat
     els.input.focus();
     return;
   }
@@ -1625,7 +1612,7 @@ async function openSession(id) {
     if (res && (res.error === "not-found" || res.error === "disabled")) refreshHistoryMenu();
     return;
   }
-  hideHistoryMenu(false);
+  hideHistoryMenu();
   // Same as New chat: this also drops a parked "Save this workflow?" card,
   // which comes back from storage.session the next time the panel opens.
   clearTranscript();
@@ -1755,7 +1742,7 @@ function confirmClear() {
       }
       resetChatView(); // the worker's chat_reset says the same
       await refreshHistoryMenu();
-      firstHistFocusable().focus();
+      firstFocusable(els.histMenu).focus();
       histStatus("History cleared.");
     },
     () => foot.querySelector(".hist-clear")?.focus(),

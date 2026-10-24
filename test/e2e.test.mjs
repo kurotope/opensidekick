@@ -903,7 +903,7 @@ async function main() {
       const idleCard = cards.find((c) => !c.active);
       check(
         !!activeCard && !!idleCard && activeCard.tag && !idleCard.tag && activeCard.bg === idleCard.bg,
-        `providers: only the active card shows the Active tag, and both cards share one background (got ${JSON.stringify(cards)})`,
+        `providers: only the active card shows the Active tag, and both cards share one background (active tag ${activeCard?.tag}, idle tag ${idleCard?.tag}, active bg "${activeCard?.bg}", idle bg "${idleCard?.bg}")`,
       );
       const learnMore = await sPage.evaluate(() =>
         ["#enable-vision", "#enable-js", "#enable-cdp"].map((id) => !!document.querySelector(id)?.closest(".field")?.querySelector("details.more")),
@@ -983,7 +983,7 @@ async function main() {
       );
       check(
         JSON.stringify(sLeft.ids) === '["mock"]' && sLeft.active === "mock" && sLeft.model === "mock-model",
-        `suggest: cleanup leaves only the active mock provider (got ${JSON.stringify(sLeft)})`,
+        `suggest: cleanup leaves only the active mock provider (ids ${JSON.stringify(sLeft.ids)}, active "${sLeft.active}", model "${sLeft.model}")`,
       );
     } catch (e) {
       check(false, `suggest: options-page flow threw: ${e.message}`);
@@ -999,60 +999,62 @@ async function main() {
     // so the suites below see the seeded config. ---
     const HOSTILE_ID = 'a"b<c>';
     const HOSTILE_TEXT = "<img src=x onerror=alert(1)>";
-    const auditLabels = (page) =>
-      page.evaluate(() => {
-        const fields = [...document.querySelectorAll("input, textarea, select")];
-        const forLabels = [...document.querySelectorAll("label[for]")];
-        // A field is named by a label[for] on its id, a label that wraps it, or
-        // an aria-labelledby that resolves to text — the three ways a name exists.
-        const named = (f) =>
-          (f.id && forLabels.some((l) => l.htmlFor === f.id)) ||
-          !!f.closest("label") ||
-          (f.getAttribute("aria-labelledby") || "").split(/\s+/).some((i) => (document.getElementById(i) || { textContent: "" }).textContent.trim());
-        const seen = {};
-        for (const el of document.querySelectorAll("[id]")) seen[el.id] = (seen[el.id] || 0) + 1;
-        return {
-          fields: fields.length,
-          labels: forLabels.length,
-          unnamed: fields.filter((f) => !named(f)).map((f) => `${f.tagName.toLowerCase()}${f.id ? "#" + f.id : "." + (f.className || "")}`),
-          unresolved: forLabels.filter((l) => !document.getElementById(l.htmlFor)).map((l) => l.htmlFor),
-          dupIds: Object.keys(seen).filter((id) => seen[id] > 1),
-        };
-      });
-    const auditRows = (page) =>
-      page.evaluate(() => {
-        const one = (listSel, rowSel, name) => {
-          const r = document.querySelector(`${listSel} ${rowSel}`);
-          if (!r) return { name, missing: true };
-          const fields = [...r.querySelectorAll("input, textarea, select")];
+    const SURVIVOR_KEY = "sk-survivor-1234567890"; // the record Remove must NOT touch
+    const DEC_MODEL = "dec-survivor"; // written by renderDecisions, the render Remove aborts
+    // One definition of "named", used by the page audit and the row audit alike:
+    // a label[for] on the field's id, a label that wraps it, or an aria-labelledby
+    // that resolves to an element with text. The row audit used to accept a bare
+    // truthy aria-labelledby, so a field pointing at nothing passed the row audit
+    // and failed the page audit. Both audits are one function, so they cannot
+    // drift. Rows are named by the section that holds them.
+    const ROWS = [["#prompt-list", ".prompt-item", "prompt"], ["#sched-list", ".sched-item", "sched"], ["#mcp-list", ".sched-item", "mcp"], ["#wf-list", ".prompt-item", "wf"]];
+    const audit = (page) =>
+      page.evaluate(
+        (rows) => {
           const forLabels = [...document.querySelectorAll("label[for]")];
-          const ids = fields.map((f) => f.id);
-          return {
-            name,
-            fields: fields.length,
-            unnamed: fields
-              .filter((f) => !((f.id && forLabels.some((l) => l.htmlFor === f.id)) || f.closest("label") || f.getAttribute("aria-labelledby")))
-              .map((f) => f.className || f.tagName),
-            emptyIds: ids.filter((id) => !id),
-            dupInRow: ids.filter((id, i) => ids.indexOf(id) !== i),
-            unresolved: [...r.querySelectorAll("label[for]")].filter((l) => !document.getElementById(l.htmlFor)).map((l) => l.htmlFor),
+          const named = (f) =>
+            (f.id && forLabels.some((l) => l.htmlFor === f.id)) ||
+            !!f.closest("label") ||
+            (f.getAttribute("aria-labelledby") || "").split(/\s+/).some((i) => (document.getElementById(i) || { textContent: "" }).textContent.trim());
+          const fields = [...document.querySelectorAll("input, textarea, select")];
+          const seen = {};
+          for (const el of document.querySelectorAll("[id]")) seen[el.id] = (seen[el.id] || 0) + 1;
+          const one = ([listSel, rowSel, name]) => {
+            const r = document.querySelector(`${listSel} ${rowSel}`);
+            if (!r) return { name, missing: true };
+            const rfields = [...r.querySelectorAll("input, textarea, select")];
+            const ids = rfields.map((f) => f.id);
+            return {
+              name,
+              fields: rfields.length,
+              unnamed: rfields.filter((f) => !named(f)).map((f) => f.className || f.tagName),
+              // An id is the wire for a label[for]; a field inside a label is named by
+              // that label and needs no id, so only an id-less field outside a label is
+              // a hole. The Enabled checkboxes are named by label.enabled-label.
+              emptyIds: rfields.filter((f) => !f.id && !f.closest("label")).map((f) => f.className || f.tagName),
+              dupInRow: ids.filter((id, i) => ids.indexOf(id) !== i),
+              unresolved: [...r.querySelectorAll("label[for]")].filter((l) => !document.getElementById(l.htmlFor)).map((l) => l.htmlFor),
+            };
           };
-        };
-        return [
-          one("#prompt-list", ".prompt-item", "prompt"),
-          one("#sched-list", ".sched-item", "sched"),
-          one("#mcp-list", ".sched-item", "mcp"),
-          one("#wf-list", ".prompt-item", "wf"),
-        ];
-      });
-    const lPage = await context.newPage();
+          return {
+            fields: fields.length,
+            labels: forLabels.length,
+            unnamed: fields.filter((f) => !named(f)).map((f) => `${f.tagName.toLowerCase()}${f.id ? "#" + f.id : "." + (f.className || "")}`),
+            unresolved: forLabels.filter((l) => !document.getElementById(l.htmlFor)).map((l) => l.htmlFor),
+            dupIds: Object.keys(seen).filter((id) => seen[id] > 1),
+            rows: rows.map(one),
+          };
+        },
+        ROWS,
+      );
+    const labelPanel = await context.newPage();
     try {
-      await lPage.goto(`chrome-extension://${extId}/src/options/options.html`, { waitUntil: "load" });
-      await lPage.waitForSelector("#provider-list .provider", { state: "attached", timeout: 5000 });
-      const fresh = await auditLabels(lPage);
+      await labelPanel.goto(`chrome-extension://${extId}/src/options/options.html`, { waitUntil: "load" });
+      await labelPanel.waitForSelector("#provider-list .provider", { state: "attached", timeout: 5000 });
+      const fresh = await audit(labelPanel);
       check(fresh.unresolved.length === 0, `options: every label[for] targets an existing element (${fresh.labels} labels, unresolved ${JSON.stringify(fresh.unresolved)})`);
       check(fresh.unnamed.length === 0, `options: every field has an associated label (${fresh.fields} fields, ${fresh.unnamed.length} unnamed: ${fresh.unnamed.join(" ")})`);
-      const mockCard = await lPage.evaluate(() => {
+      const mockCard = await labelPanel.evaluate(() => {
         const card = document.querySelector('.provider[data-id="mock"]');
         const out = {};
         for (const cls of ["model", "base-url", "api-key"]) {
@@ -1063,63 +1065,86 @@ async function main() {
       });
       check(
         ["model", "base-url", "api-key"].every((c) => mockCard[c].id === `${c}-mock` && mockCard[c].resolves && mockCard[c].labelled),
-        `options: provider card fields are labelled (got ${JSON.stringify(mockCard)})`,
+        `options: provider card fields are labelled (${["model", "base-url", "api-key"].map((c) => `${c} id ${mockCard[c].id}, resolves ${mockCard[c].resolves}, label[for] ${mockCard[c].labelled}`).join(" | ")})`,
       );
 
       // The added card is the venice flow's card, so its ids come from a fresh
       // uuid: they must not repeat the seeded card's ids anywhere in the page.
-      await lPage.selectOption("#preset-select", "venice");
-      await lPage.click("#add-provider");
-      await lPage.waitForFunction(() => document.querySelectorAll(".provider").length === 2, null, { timeout: 5000 });
-      const twoCards = await auditLabels(lPage);
+      await labelPanel.selectOption("#preset-select", "venice");
+      await labelPanel.click("#add-provider");
+      await labelPanel.waitForFunction(() => document.querySelectorAll(".provider").length === 2, null, { timeout: 5000 });
+      const twoCards = await audit(labelPanel);
       check(
         twoCards.dupIds.length === 0 && twoCards.unresolved.length === 0 && twoCards.unnamed.length === 0,
         `options: ids unique across the seeded and added provider card (${twoCards.fields} fields, dup ${JSON.stringify(twoCards.dupIds)}, unnamed ${twoCards.unnamed.length})`,
       );
-      const newId = await lPage.evaluate(() => document.querySelectorAll(".provider")[1].dataset.id);
+      const newId = await labelPanel.evaluate(() => document.querySelectorAll(".provider")[1].dataset.id);
       // Remove it the way the venice block does — poll storage, then click — so
       // the card is settled before the next audit.
-      await lPage.waitForFunction(
+      await labelPanel.waitForFunction(
         ([key, url]) => chrome.storage.local.get(key).then((r) => (r[key]?.providers || []).some((p) => p.baseUrl === url)),
         [STORAGE_KEY, VENICE_BASE],
         { timeout: 5000 },
       );
-      await lPage.evaluate((id) => document.querySelector(`.provider[data-id="${id}"]`).querySelector(".delete-provider").click(), newId);
-      await lPage.waitForFunction(() => document.querySelectorAll(".provider").length === 1, null, { timeout: 5000 });
+      await labelPanel.evaluate((id) => document.querySelector(`.provider[data-id="${id}"]`).querySelector(".delete-provider").click(), newId);
+      await labelPanel.waitForFunction(() => document.querySelectorAll(".provider").length === 1, null, { timeout: 5000 });
 
-      // The rows a user adds from this page: prompt, scheduled task, MCP server.
+      // Four row kinds are audited: prompt, scheduled task, MCP server, workflow.
       // Their sections start closed (openExtra opens a section only once it holds
       // something), so open them as the reader would before clicking Add.
-      await lPage.evaluate(() => {
+      await labelPanel.evaluate(() => {
         for (const id of ["sec-prompts", "sec-sched", "sec-mcp"]) document.getElementById(id).open = true;
       });
-      await lPage.click("#add-prompt");
-      await lPage.click("#add-sched");
-      await lPage.click("#add-mcp");
-      await lPage.waitForFunction(
+      await labelPanel.click("#add-prompt");
+      await labelPanel.click("#add-sched");
+      await labelPanel.click("#add-mcp");
+      // A workflow row has no Add button on this page — a workflow is recorded with
+      // the side panel's Record button — so the fourth row kind is seeded the way the
+      // suite seeds state, from the options page the other scenarios write through.
+      // The write MERGES into the stored config: writing the seed back here would drop
+      // the three rows just added, because persist() writes the whole object. Then the
+      // page reloads, so the row is rendered from the config at load instead of racing
+      // the storage listener that suppresses re-render for this page's own Add writes.
+      await optPage.evaluate(
+        async ([key, wf]) => {
+          const cfg = (await chrome.storage.local.get(key))[key];
+          await chrome.storage.local.set({ [key]: { ...cfg, workflows: [wf] } });
+        },
+        [STORAGE_KEY, { id: "wfa", name: "Cat search", steps: [{ description: "Click Search" }], startUrl: `${base}/page` }],
+      );
+      await labelPanel.reload({ waitUntil: "load" });
+      await labelPanel.waitForFunction(
         () =>
           document.querySelectorAll("#prompt-list .prompt-item").length === 1 &&
           document.querySelectorAll("#sched-list .sched-item").length === 1 &&
-          document.querySelectorAll("#mcp-list .sched-item").length === 1,
+          document.querySelectorAll("#mcp-list .sched-item").length === 1 &&
+          document.querySelectorAll("#wf-list .prompt-item").length === 1,
         null,
         { timeout: 5000 },
       );
-      const rows = await auditRows(lPage);
-      const withRows = await auditLabels(lPage);
-      const rowsClean = rows.slice(0, 3).every((r) => !r.missing && r.unnamed.length === 0 && r.emptyIds.length === 0 && r.dupInRow.length === 0 && r.unresolved.length === 0);
+      const withRows = await audit(labelPanel);
+      const rowFields = (r) => `${r.name} ${r.missing ? "missing" : `fields ${r.fields}, unnamed ${r.unnamed.length}, emptyIds ${r.emptyIds.length}, dupInRow ${r.dupInRow.length}, unresolved ${r.unresolved.length}`}`;
+      const rowsClean = withRows.rows.every((r) => !r.missing && r.unnamed.length === 0 && r.emptyIds.length === 0 && r.dupInRow.length === 0 && r.unresolved.length === 0);
       check(
         rowsClean && withRows.dupIds.length === 0,
-        `options: sched, MCP, and prompt rows have labelled fields (got ${JSON.stringify(rows.slice(0, 3))}, page dup ${JSON.stringify(withRows.dupIds)})`,
+        `options: prompt, sched, MCP, and workflow rows have labelled fields (${withRows.rows.map(rowFields).join(" | ")}, page dupIds ${withRows.dupIds.length})`,
       );
 
       // Hostile stored data: loadConfig copies providers, prompts and workflows
       // verbatim, so the page is the only place a hostile id is made safe.
-      await lPage.evaluate(
-        async ([key, cfg, hostileId, hostileText]) => {
+      await labelPanel.evaluate(
+        async ([key, cfg, hostileId, hostileText, survivorKey]) => {
           await chrome.storage.local.set({
             [key]: {
               ...cfg,
-              providers: [...cfg.providers, { id: hostileId, name: hostileText, type: "openai", baseUrl: "", apiKey: "", model: "", models: [] }],
+              // The hostile card is seeded probeable — a loopback base URL needs no
+              // key and the model is one the provider lists — so the Remove below
+              // runs with a probe in flight on it. The survivor carries a key and a
+              // model, so a Remove that hit the wrong record shows up in storage.
+              providers: [
+                { ...cfg.providers[0], apiKey: survivorKey },
+                { id: hostileId, name: hostileText, type: "openai", baseUrl: cfg.providers[0].baseUrl, apiKey: "sk-hostile-1234567890", model: "mock-model", models: ["mock-model"] },
+              ],
               prompts: [{ id: "hp1", command: hostileText, text: hostileText }],
               workflows: [{ id: "hw1", name: "Hostile", steps: [{ description: hostileText }], startUrl: "" }],
               scheduledTasks: [],
@@ -1127,11 +1152,11 @@ async function main() {
             },
           });
         },
-        [STORAGE_KEY, config, HOSTILE_ID, HOSTILE_TEXT],
+        [STORAGE_KEY, config, HOSTILE_ID, HOSTILE_TEXT, SURVIVOR_KEY],
       );
-      await lPage.reload({ waitUntil: "load" });
-      await lPage.waitForFunction(() => document.querySelectorAll(".provider").length === 2, null, { timeout: 5000 });
-      const hostile = await lPage.evaluate(
+      await labelPanel.reload({ waitUntil: "load" });
+      await labelPanel.waitForFunction(() => document.querySelectorAll(".provider").length === 2, null, { timeout: 5000 });
+      const hostile = await labelPanel.evaluate(
         (text) => {
           const card = [...document.querySelectorAll(".provider")].find((c) => c.querySelector(".pname").textContent === text);
           const prow = document.querySelector("#prompt-list .prompt-item");
@@ -1154,10 +1179,10 @@ async function main() {
         },
         HOSTILE_TEXT,
       );
-      const hostilePage = await auditLabels(lPage);
+      const hostilePage = await audit(labelPanel);
       check(
         hostile.cardFields.length === 3 && hostile.cardFields.every((f) => f.resolves && f.safe) && hostilePage.dupIds.length === 0,
-        `options: a stored provider id with a quote keeps its labels resolving (got ${JSON.stringify(hostile.cardFields)}, page dup ${JSON.stringify(hostilePage.dupIds)})`,
+        `options: a stored provider id with a quote keeps its labels resolving (${hostile.cardFields.map((f) => `id ${f.id}, resolves ${f.resolves}, safe ${f.safe}`).join(" | ")}, page dupIds ${hostilePage.dupIds.length})`,
       );
       check(
         hostile.pname === HOSTILE_TEXT && hostile.cardImgs === 0 && hostile.cmd === HOSTILE_TEXT && hostile.prowImgs === 0 && hostile.prowResolves.every(Boolean) && hostilePage.unnamed.length === 0,
@@ -1168,11 +1193,73 @@ async function main() {
         `options: a hostile workflow step renders as text and its name is labelled (got "${hostile.wfStep}", imgs ${hostile.wfImgs}, labelled ${hostile.wfNameResolves})`,
       );
 
-      // Put the seeded config back for every suite below this one.
-      await lPage.evaluate(([key, cfg]) => chrome.storage.local.set({ [key]: cfg }), [STORAGE_KEY, config]);
-      await lPage.reload({ waitUntil: "load" });
-      await lPage.waitForSelector("#provider-list .provider", { state: "attached", timeout: 5000 });
-      const restored = await auditLabels(lPage);
+      // Threat 2's second half: Remove on the hostile card while a probe is in
+      // flight on it. That is the one state where renderProviders() rebuilds a
+      // data-id selector from a stored record id, and `a"b<c>` makes that selector
+      // a SyntaxError — the render aborts, renderDecisions() never runs, and the
+      // page that holds API keys stops rendering. The card is found by its name,
+      // never by a data-id selector, so the test does not use the fragile shape.
+      const hostileErrs = [];
+      labelPanel.on("pageerror", (e) => hostileErrs.push(e.message));
+      const clickHostile = (cls) =>
+        labelPanel.evaluate(
+          ([text, cls]) => {
+            const card = [...document.querySelectorAll(".provider")].find((c) => c.querySelector(".pname").textContent === text);
+            if (!card) return false;
+            card.querySelector(cls).click();
+            return true;
+          },
+          [HOSTILE_TEXT, cls],
+        );
+      probeDelayMs = 4000; // hold the hostile card's tools probe open through Remove
+      try {
+        await clickHostile(".test-model");
+        const testing = await labelPanel
+          .waitForFunction(
+            (text) => {
+              const card = [...document.querySelectorAll(".provider")].find((c) => c.querySelector(".pname").textContent === text);
+              return /Testing/.test((card?.querySelector(".test-status") || { textContent: "" }).textContent);
+            },
+            HOSTILE_TEXT,
+            { timeout: 5000 },
+          )
+          .then(() => true)
+          .catch(() => false);
+        // A write from outside this page is what rebuilds the cards, and the checks
+        // section is the render that Remove aborts: its new value is the proof.
+        await labelPanel.evaluate(
+          async ([key, decModel]) => {
+            const cfg = (await chrome.storage.local.get(key))[key];
+            cfg.decisions = { ...(cfg.decisions || {}), model: decModel };
+            await chrome.storage.local.set({ [key]: cfg });
+          },
+          [STORAGE_KEY, DEC_MODEL],
+        );
+        await clickHostile(".delete-provider");
+        await labelPanel.waitForFunction(([key]) => chrome.storage.local.get(key).then((r) => (r[key]?.providers || []).length === 1), [STORAGE_KEY], { timeout: 5000 });
+        const survivors = await labelPanel.evaluate(
+          ([key]) => chrome.storage.local.get(key).then((r) => (r[key]?.providers || []).map((p) => `${p.id}/${p.apiKey}/${p.model}`)),
+          [STORAGE_KEY],
+        );
+        const decModel = await labelPanel.$eval("#dec-model", (el) => el.value).catch(() => "");
+        check(
+          testing && survivors.length === 1 && survivors[0] === `mock/${SURVIVOR_KEY}/mock-model`,
+          `options: Remove on a provider whose stored id is a quote drops only that record (probe in flight ${testing}, survivors ${survivors.join(" | ")})`,
+        );
+        check(
+          hostileErrs.length === 0 && decModel === DEC_MODEL,
+          `options: Remove on the hostile card leaves the checks section rendered (dec-model "${decModel}", page errors ${hostileErrs.length ? `"${hostileErrs.join("; ")}"` : "none"})`,
+        );
+      } finally {
+        probeDelayMs = 0;
+        // Put the seeded config back for every suite below this one. In a finally,
+        // so a throw inside the block cannot leave a"b<c> in storage.
+        await labelPanel.evaluate(([key, cfg]) => chrome.storage.local.set({ [key]: cfg }), [STORAGE_KEY, config]);
+      }
+
+      await labelPanel.reload({ waitUntil: "load" });
+      await labelPanel.waitForSelector("#provider-list .provider", { state: "attached", timeout: 5000 });
+      const restored = await audit(labelPanel);
       check(
         restored.unresolved.length === 0 && restored.unnamed.length === 0 && restored.dupIds.length === 0 && restored.fields === fresh.fields,
         `options: the restored seed keeps every field named (${restored.fields} fields, unnamed ${restored.unnamed.length}, dup ${JSON.stringify(restored.dupIds)})`,
@@ -1180,7 +1267,7 @@ async function main() {
     } catch (e) {
       check(false, `options: label association flow threw: ${e.message}`);
     } finally {
-      await lPage.close().catch(() => {});
+      await labelPanel.close().catch(() => {});
     }
 
     // Collect agent events, and auto-respond to permission prompts (recording
@@ -1367,162 +1454,170 @@ async function main() {
     check(planRun.events.filter((e) => e.kind === "error").length === 0, "plan: no error events");
 
     // --- Saved prompts / "/" menu (drive the real side panel UI) ---
-    await optPage.evaluate(([key, cfg]) => chrome.storage.local.set({ [key]: cfg }), [
-      STORAGE_KEY,
-      { ...config, prompts: [{ id: "p1", command: "summarize", text: "Summarize this page in 3 bullets." }] },
-    ]);
+    // Two writes (one prompt, then two) drive the menu, so the seed goes back in a
+    // finally: a throw in this block must not leave the scenarios below running
+    // against prompts the seed never carried.
     const panel = await context.newPage();
-    await panel.goto(`chrome-extension://${extId}/src/sidepanel/sidepanel.html`, { waitUntil: "load" });
-    await panel.waitForTimeout(400); // let the panel's async prompt-load finish
-    // The composer's name cannot be its placeholder: updateConfiguredUI rewrites
-    // the placeholder for the unconfigured state, so the name is captured here
-    // (configured) and checked with the gate panel at the end of the suite.
-    const composerCfg = await panel.evaluate(() => {
-      const el = document.getElementById("input");
-      return { name: el.getAttribute("aria-label") || "", placeholder: el.placeholder };
-    });
-    await panel.click("#input");
-    await panel.type("#input", "/sum");
-    await panel.waitForSelector("#slash-menu .slash-item", { timeout: 4000 });
-    const menuText = await panel.$eval("#slash-menu", (el) => el.textContent);
-    check(/summarize/.test(menuText), "slash: typing / shows the matching saved prompt");
-    await panel.click("#slash-menu .slash-item");
-    const slashInputVal = await panel.$eval("#input", (el) => el.value);
-    check(slashInputVal === "Summarize this page in 3 bullets.", `slash: selecting inserts the prompt text (got "${slashInputVal}")`);
+    let composerCfg = { name: "", placeholder: "" }; // read here, checked with the gate panel at the end of the suite
+    try {
+      await optPage.evaluate(([key, cfg]) => chrome.storage.local.set({ [key]: cfg }), [
+        STORAGE_KEY,
+        { ...config, prompts: [{ id: "p1", command: "summarize", text: "Summarize this page in 3 bullets." }] },
+      ]);
+      await panel.goto(`chrome-extension://${extId}/src/sidepanel/sidepanel.html`, { waitUntil: "load" });
+      await panel.waitForTimeout(400); // let the panel's async prompt-load finish
+      // The composer's name cannot be its placeholder: updateConfiguredUI rewrites
+      // the placeholder for the unconfigured state, so the name is captured here
+      // (configured) and checked with the gate panel at the end of the suite.
+      composerCfg = await panel.evaluate(() => {
+        const el = document.getElementById("input");
+        return { name: el.getAttribute("aria-label") || "", placeholder: el.placeholder };
+      });
+      await panel.click("#input");
+      await panel.type("#input", "/sum");
+      await panel.waitForSelector("#slash-menu .slash-item", { timeout: 4000 });
+      const menuText = await panel.$eval("#slash-menu", (el) => el.textContent);
+      check(/summarize/.test(menuText), "slash: typing / shows the matching saved prompt");
+      await panel.click("#slash-menu .slash-item");
+      const slashInputVal = await panel.$eval("#input", (el) => el.value);
+      check(slashInputVal === "Summarize this page in 3 bullets.", `slash: selecting inserts the prompt text (got "${slashInputVal}")`);
 
-    // --- Slash-menu semantics for a screen reader (a div of divs is invisible
-    // to one). Two prompts so ArrowDown has a second option to move to; the
-    // panel reloads prompts from the storage change, so poll for two rows.
-    await optPage.evaluate(([key, cfg]) => chrome.storage.local.set({ [key]: cfg }), [
-      STORAGE_KEY,
-      {
-        ...config,
-        prompts: [
-          { id: "p1", command: "summarize", text: "Summarize this page in 3 bullets." },
-          { id: "p2", command: "summary", text: "Summarize this page in 5 bullets." },
-        ],
-      },
-    ]);
-    await panel.fill("#input", "/sum");
-    await panel.waitForFunction(() => document.querySelectorAll("#slash-menu .slash-item").length >= 2, null, { timeout: 5000 }).catch(() => {});
-    const openList = await panel.evaluate(() => {
-      const menu = document.getElementById("slash-menu");
-      const input = document.getElementById("input");
-      const activeId = input.getAttribute("aria-activedescendant") || "";
-      return {
-        role: menu.getAttribute("role") || "",
-        label: menu.getAttribute("aria-label") || "",
-        visible: !menu.hidden,
-        items: [...menu.querySelectorAll(".slash-item")].map((el, i) => ({
-          id: el.id,
-          role: el.getAttribute("role") || "",
-          selected: el.getAttribute("aria-selected") || "",
-          resolves: !!document.getElementById(el.id),
-          wanted: `slash-${i}`,
-        })),
-        expanded: input.getAttribute("aria-expanded") || "",
-        controls: input.getAttribute("aria-controls") || "",
-        autocomplete: input.getAttribute("aria-autocomplete") || "",
-        activeId,
-        activeResolves: !!document.getElementById(activeId),
-        focusId: document.activeElement.id,
-      };
-    });
-    const selectedIds = openList.items.filter((it) => it.selected === "true").map((it) => it.id);
-    check(
-      openList.role === "listbox" && openList.label === "Saved prompts" && openList.visible,
-      `slash: the menu is a listbox named Saved prompts (role "${openList.role}", label "${openList.label}", visible ${openList.visible})`,
-    );
-    check(
-      openList.items.length >= 2 &&
-        openList.items.every((it) => it.role === "option" && it.id === it.wanted && it.resolves) &&
-        selectedIds.length === 1 &&
-        selectedIds[0] === "slash-0",
-      `slash: items are options with ids and one selected (${JSON.stringify(openList.items)}, selected ${JSON.stringify(selectedIds)})`,
-    );
-    check(
-      openList.expanded === "true" &&
-        openList.controls === "slash-menu" &&
-        openList.autocomplete === "list" &&
-        openList.activeId === "slash-0" &&
-        openList.activeResolves &&
-        openList.focusId === "input",
-      `slash: the composer describes the open listbox (${JSON.stringify(openList)})`,
-    );
-    // ArrowDown moves the activedescendant with the selection; Escape closes the
-    // list, clears the pointer, and leaves focus in the composer.
-    await panel.keyboard.press("ArrowDown");
-    const afterDown = await panel.evaluate(() => {
-      const input = document.getElementById("input");
-      const activeId = input.getAttribute("aria-activedescendant") || "";
-      const active = document.getElementById(activeId);
-      return {
-        activeId,
-        selected: [...document.querySelectorAll('#slash-menu .slash-item[aria-selected="true"]')].map((el) => el.id),
-        activeIsOption: !!active && active.getAttribute("role") === "option",
-        focusId: document.activeElement.id,
-      };
-    });
-    await panel.keyboard.press("Escape");
-    const afterEsc = await panel.evaluate(() => {
-      const input = document.getElementById("input");
-      return {
-        expanded: input.getAttribute("aria-expanded") || "",
-        hasActive: input.hasAttribute("aria-activedescendant"),
-        hidden: document.getElementById("slash-menu").hidden,
-        focusId: document.activeElement.id,
-      };
-    });
-    check(
-      afterDown.activeId === "slash-1" &&
-        afterDown.selected.length === 1 &&
-        afterDown.selected[0] === "slash-1" &&
-        afterDown.activeIsOption &&
-        afterDown.focusId === "input" &&
-        afterEsc.expanded === "false" &&
-        !afterEsc.hasActive &&
-        afterEsc.hidden &&
-        afterEsc.focusId === "input",
-      `slash: ArrowDown moves activedescendant, Escape clears it (down ${JSON.stringify(afterDown)}, escape ${JSON.stringify(afterEsc)})`,
-    );
-
-    // Empty state + composer layout: one question line (no hero eyebrow), the
-    // suggestions still fill the box, Send sits inside the field, the approval
-    // control sits under it, and the panel's controls are 32px+ targets.
-    await panel.fill("#input", "");
-    const ui = await panel.evaluate(() => {
-      const box = (sel) => document.querySelector(sel)?.getBoundingClientRect() || { top: 0, bottom: 0, height: 0 };
-      const send = document.getElementById("send-btn");
-      const first = document.querySelector(".examples li");
-      first?.querySelector("button")?.click(); // the li's listener fires via bubbling
-      return {
-        title: (document.querySelector(".empty-title")?.textContent || "").trim(),
-        eyebrow: !!document.querySelector("#empty-state .eyebrow"),
-        buttons: document.querySelectorAll(".examples li button").length,
-        filled: document.getElementById("input").value,
-        example: first?.dataset.example || "",
-        sendInField: !!send?.closest(".composer-field"),
-        sendLabel: send?.getAttribute("aria-label") || "",
-        segUnder: box("#autonomy").top >= box(".composer-field").bottom,
-        heights: {
-          send: box("#send-btn").height,
-          seg: Math.min(...[...document.querySelectorAll(".seg")].map((el) => el.getBoundingClientRect().height)),
-          newChat: box("#new-chat").height,
-          contextHint: box("#context-hint").height,
+      // --- Slash-menu semantics for a screen reader (a div of divs is invisible
+      // to one). Two prompts so ArrowDown has a second option to move to; the
+      // panel reloads prompts from the storage change, so poll for two rows.
+      await optPage.evaluate(([key, cfg]) => chrome.storage.local.set({ [key]: cfg }), [
+        STORAGE_KEY,
+        {
+          ...config,
+          prompts: [
+            { id: "p1", command: "summarize", text: "Summarize this page in 3 bullets." },
+            { id: "p2", command: "summary", text: "Summarize this page in 5 bullets." },
+          ],
         },
-        // The working line is the panel's own live text: role="status" is the
-        // contract that lets a reader hear "Working…" without a keyboard move.
-        statusRole: document.getElementById("status-bar").getAttribute("role") || "",
-      };
-    });
-    check(ui.title === "What should I do on this page?", `empty: the empty state asks one question (got "${ui.title}")`);
-    check(!ui.eyebrow, "empty: no hero eyebrow in the empty state");
-    check(ui.buttons === 3 && ui.example && ui.filled === ui.example, `empty: three suggestion buttons, and the first fills the box with its prompt (got ${ui.buttons}, "${ui.filled}")`);
-    check(ui.sendInField && ui.sendLabel === "Send", `composer: Send is an icon button inside the field labelled "Send" (in field ${ui.sendInField}, label "${ui.sendLabel}")`);
-    check(ui.segUnder, "composer: the approval control sits under the field");
-    check(Object.values(ui.heights).every((h) => h >= 32), `composer: Send, segments, New chat and the site chip are 32px+ targets (got ${JSON.stringify(ui.heights)})`);
-    check(ui.statusRole === "status", `panel: the status bar is a status region (role "${ui.statusRole}")`);
-    await panel.close();
+      ]);
+      await panel.fill("#input", "/sum");
+      await panel.waitForFunction(() => document.querySelectorAll("#slash-menu .slash-item").length >= 2, null, { timeout: 5000 }).catch(() => {});
+      const openList = await panel.evaluate(() => {
+        const menu = document.getElementById("slash-menu");
+        const input = document.getElementById("input");
+        const activeId = input.getAttribute("aria-activedescendant") || "";
+        return {
+          role: menu.getAttribute("role") || "",
+          label: menu.getAttribute("aria-label") || "",
+          visible: !menu.hidden,
+          items: [...menu.querySelectorAll(".slash-item")].map((el, i) => ({
+            id: el.id,
+            role: el.getAttribute("role") || "",
+            selected: el.getAttribute("aria-selected") || "",
+            resolves: !!document.getElementById(el.id),
+            wanted: `slash-${i}`,
+          })),
+          expanded: input.getAttribute("aria-expanded") || "",
+          controls: input.getAttribute("aria-controls") || "",
+          autocomplete: input.getAttribute("aria-autocomplete") || "",
+          activeId,
+          activeResolves: !!document.getElementById(activeId),
+          focusId: document.activeElement.id,
+        };
+      });
+      const selectedIds = openList.items.filter((it) => it.selected === "true").map((it) => it.id);
+      check(
+        openList.role === "listbox" && openList.label === "Saved prompts" && openList.visible,
+        `slash: the menu is a listbox named Saved prompts (role "${openList.role}", label "${openList.label}", visible ${openList.visible})`,
+      );
+      check(
+        openList.items.length >= 2 &&
+          openList.items.every((it) => it.role === "option" && it.id === it.wanted && it.resolves) &&
+          selectedIds.length === 1 &&
+          selectedIds[0] === "slash-0",
+        `slash: items are options with ids and one selected (${openList.items.map((it) => `${it.id}: role ${it.role}, selected ${it.selected}, resolves ${it.resolves}`).join(" | ")}, selected ${selectedIds.join(" ")})`,
+      );
+      check(
+        openList.expanded === "true" &&
+          openList.controls === "slash-menu" &&
+          openList.autocomplete === "list" &&
+          openList.activeId === "slash-0" &&
+          openList.activeResolves &&
+          openList.focusId === "input",
+        `slash: the composer describes the open listbox (expanded "${openList.expanded}", controls "${openList.controls}", autocomplete "${openList.autocomplete}", activedescendant "${openList.activeId}", resolves ${openList.activeResolves}, focus "${openList.focusId}")`,
+      );
+      // ArrowDown moves the activedescendant with the selection; Escape closes the
+      // list, clears the pointer, and leaves focus in the composer.
+      await panel.keyboard.press("ArrowDown");
+      const afterDown = await panel.evaluate(() => {
+        const input = document.getElementById("input");
+        const activeId = input.getAttribute("aria-activedescendant") || "";
+        const active = document.getElementById(activeId);
+        return {
+          activeId,
+          selected: [...document.querySelectorAll('#slash-menu .slash-item[aria-selected="true"]')].map((el) => el.id),
+          activeIsOption: !!active && active.getAttribute("role") === "option",
+          focusId: document.activeElement.id,
+        };
+      });
+      await panel.keyboard.press("Escape");
+      const afterEsc = await panel.evaluate(() => {
+        const input = document.getElementById("input");
+        return {
+          expanded: input.getAttribute("aria-expanded") || "",
+          hasActive: input.hasAttribute("aria-activedescendant"),
+          hidden: document.getElementById("slash-menu").hidden,
+          focusId: document.activeElement.id,
+        };
+      });
+      check(
+        afterDown.activeId === "slash-1" &&
+          afterDown.selected.length === 1 &&
+          afterDown.selected[0] === "slash-1" &&
+          afterDown.activeIsOption &&
+          afterDown.focusId === "input" &&
+          afterEsc.expanded === "false" &&
+          !afterEsc.hasActive &&
+          afterEsc.hidden &&
+          afterEsc.focusId === "input",
+        `slash: ArrowDown moves activedescendant, Escape clears it (down: activedescendant "${afterDown.activeId}", selected ${afterDown.selected.join(" ")}, isOption ${afterDown.activeIsOption}, focus "${afterDown.focusId}"; escape: expanded "${afterEsc.expanded}", activedescendant kept ${afterEsc.hasActive}, hidden ${afterEsc.hidden}, focus "${afterEsc.focusId}")`,
+      );
+
+      // Empty state + composer layout: one question line (no hero eyebrow), the
+      // suggestions still fill the box, Send sits inside the field, the approval
+      // control sits under it, and the panel's controls are 32px+ targets.
+      await panel.fill("#input", "");
+      const ui = await panel.evaluate(() => {
+        const box = (sel) => document.querySelector(sel)?.getBoundingClientRect() || { top: 0, bottom: 0, height: 0 };
+        const send = document.getElementById("send-btn");
+        const first = document.querySelector(".examples li");
+        first?.querySelector("button")?.click(); // the li's listener fires via bubbling
+        return {
+          title: (document.querySelector(".empty-title")?.textContent || "").trim(),
+          eyebrow: !!document.querySelector("#empty-state .eyebrow"),
+          buttons: document.querySelectorAll(".examples li button").length,
+          filled: document.getElementById("input").value,
+          example: first?.dataset.example || "",
+          sendInField: !!send?.closest(".composer-field"),
+          sendLabel: send?.getAttribute("aria-label") || "",
+          segUnder: box("#autonomy").top >= box(".composer-field").bottom,
+          heights: {
+            send: box("#send-btn").height,
+            seg: Math.min(...[...document.querySelectorAll(".seg")].map((el) => el.getBoundingClientRect().height)),
+            newChat: box("#new-chat").height,
+            contextHint: box("#context-hint").height,
+          },
+          // The working line is the panel's own live text: role="status" is the
+          // contract that lets a reader hear "Working…" without a keyboard move.
+          statusRole: document.getElementById("status-bar").getAttribute("role") || "",
+        };
+      });
+      check(ui.title === "What should I do on this page?", `empty: the empty state asks one question (got "${ui.title}")`);
+      check(!ui.eyebrow, "empty: no hero eyebrow in the empty state");
+      check(ui.buttons === 3 && ui.example && ui.filled === ui.example, `empty: three suggestion buttons, and the first fills the box with its prompt (got ${ui.buttons}, "${ui.filled}")`);
+      check(ui.sendInField && ui.sendLabel === "Send", `composer: Send is an icon button inside the field labelled "Send" (in field ${ui.sendInField}, label "${ui.sendLabel}")`);
+      check(ui.segUnder, "composer: the approval control sits under the field");
+      check(Object.values(ui.heights).every((h) => h >= 32), `composer: Send, segments, New chat and the site chip are 32px+ targets (got ${JSON.stringify(ui.heights)})`);
+      check(ui.statusRole === "status", `panel: the status bar is a status region (role "${ui.statusRole}")`);
+    } finally {
+      await optPage.evaluate(([key, cfg]) => chrome.storage.local.set({ [key]: cfg }), [STORAGE_KEY, config]);
+      await panel.close().catch(() => {});
+    }
 
     // --- Scheduled task: "Run now" opens the URL and runs the task headlessly ---
     const listSessions = () => optPage.evaluate((t) => chrome.runtime.sendMessage({ type: t }), MSG.LIST_SESSIONS);
@@ -1603,11 +1698,29 @@ async function main() {
     // role="dialog" on its own is a false promise (threat 10): the trigger has to
     // say it is expanded, focus has to land inside on open, and Escape has to hand
     // focus back to the button instead of leaving it on document.body (threat 7).
+    // A row that a Tab cannot reach is the same false promise at row level, so the
+    // rows are tab stops, arrows rove them, and Enter fires the row.
     const wfPanel = await context.newPage();
     await wfPanel.goto(`chrome-extension://${extId}/src/sidepanel/sidepanel.html`, { waitUntil: "load" });
     await wfPanel.waitForTimeout(500);
+    // Two rows, so Tab and ArrowDown have somewhere to go. Seed order is render
+    // order: row 0 is the recorded Dog search, row 1 the Cat search.
+    const wf2 = { id: "wf2", name: "Cat search", startUrl: `${base}/page`, steps: [{ action: "click", description: "Click Search" }] };
+    await optPage.evaluate(([key, cfg]) => chrome.storage.local.set({ [key]: cfg }), [STORAGE_KEY, { ...config, workflows: [wf, wf2] }]);
+    // New chat first: a replay continues the open chat, and the mock's scripted
+    // tool sequence is keyed on the tool messages already in it.
+    await wfPanel.click("#new-chat");
     await wfPanel.click("#workflows-btn");
     await wfPanel.waitForSelector("#wf-menu:not([hidden]) .wf-item", { timeout: 5000 }).catch(() => {});
+    const rowOf = (pg) =>
+      pg.evaluate(() => {
+        const a = document.activeElement;
+        return {
+          row: a.classList.contains("wf-item"),
+          role: a.getAttribute("role"),
+          name: a.querySelector(".wf-name") ? a.querySelector(".wf-name").textContent : "",
+        };
+      });
     const wfOpen = await wfPanel.evaluate(() => ({
       role: document.getElementById("wf-menu").getAttribute("role"),
       label: document.getElementById("wf-menu").getAttribute("aria-label"),
@@ -1617,13 +1730,79 @@ async function main() {
       controls: document.getElementById("workflows-btn").getAttribute("aria-controls"),
       focusIn: document.getElementById("wf-menu").contains(document.activeElement),
       focusId: document.activeElement.id,
+      // The container is a focusable dialog, so focusIn alone passes in its weakest
+      // form: the check has to say which element inside the dialog has the focus.
+      row: document.activeElement.classList.contains("wf-item"),
+      rowRole: document.activeElement.getAttribute("role"),
+      rowTab: document.activeElement.getAttribute("tabindex"),
+      rowName: document.activeElement.querySelector(".wf-name")
+        ? document.activeElement.querySelector(".wf-name").textContent
+        : "",
     }));
     check(
       wfOpen.role === "dialog" && wfOpen.label === "Saved workflows" && wfOpen.tab === "-1" &&
         wfOpen.popup === "dialog" && wfOpen.expanded === "true" && wfOpen.controls === "wf-menu",
-      `workflows: the menu is a named dialog and its trigger describes it (${JSON.stringify(wfOpen)})`,
+      `workflows: the menu is a named dialog and its trigger describes it (role "${wfOpen.role}", label "${wfOpen.label}", tabindex "${wfOpen.tab}", popup "${wfOpen.popup}", expanded "${wfOpen.expanded}", controls "${wfOpen.controls}")`,
     );
-    check(wfOpen.focusIn, `workflows: focus lands inside on open (activeElement id "${wfOpen.focusId}")`);
+    check(
+      wfOpen.focusIn && wfOpen.row && wfOpen.rowRole === "button" && wfOpen.rowTab === "0" &&
+        wfOpen.rowName === "Dog search",
+      `workflows: focus lands inside on open on a row, not the container (in menu ${wfOpen.focusIn}, row ${wfOpen.row}, role "${wfOpen.rowRole}", tabindex "${wfOpen.rowTab}", name "${wfOpen.rowName}")`,
+    );
+    // Tab walks the rows, and the arrows rove them, wrapping at both ends: row 0 →
+    // row 1 by Tab, row 1 → row 0 by ArrowDown, row 0 → row 1 by ArrowUp.
+    await wfPanel.keyboard.press("Tab");
+    const tabRow = await rowOf(wfPanel);
+    await wfPanel.keyboard.press("ArrowDown");
+    const downRow = await rowOf(wfPanel);
+    await wfPanel.keyboard.press("ArrowUp");
+    const upRow = await rowOf(wfPanel);
+    const rowDesc = (r) => `${r.row ? "row" : "not row"} "${r.name}"`;
+    check(
+      tabRow.row && tabRow.name === "Cat search" && downRow.row && downRow.name === "Dog search" &&
+        upRow.row && upRow.name === "Cat search",
+      `workflows: Tab and the arrows reach the rows (Tab ${rowDesc(tabRow)}, ArrowDown ${rowDesc(downRow)}, ArrowUp ${rowDesc(upRow)})`,
+    );
+    // Enter and Space on the focused row have to run the workflow, not just move
+    // focus: role="button" promises both keys, so pressing Enter alone guards only
+    // half of it. Each press watches the run the way every other run in this suite
+    // is watched — the agent-event log on the options page, and the test page's own
+    // search result. A press gets a fresh chat because the mock's scripted tool
+    // sequence is keyed on the tool messages already in it, and #new-chat sits
+    // outside the menu, so its click also closes an open menu before the re-open.
+    const pressRow = async (key) => {
+      await optPage.evaluate(() => (window.__events = []));
+      await testPage.evaluate(() => {
+        document.querySelector("#out").textContent = "";
+        document.querySelector("#q").value = "";
+      });
+      await testPage.bringToFront();
+      // Settle the previous run first: a row press is refused while one is running.
+      await wfPanel.waitForFunction(() => document.getElementById("stop-btn").hidden, null, { timeout: 10000 }).catch(() => {});
+      await wfPanel.click("#new-chat");
+      await wfPanel.click("#workflows-btn");
+      await wfPanel.waitForSelector("#wf-menu:not([hidden]) .wf-item", { timeout: 5000 }).catch(() => {});
+      await wfPanel.locator("#wf-menu .wf-item").first().focus().catch(() => {});
+      await wfPanel.keyboard.press(key).catch(() => {});
+      let out = "";
+      for (let i = 0; i < 80; i++) {
+        out = await testPage.$eval("#out", (el) => el.textContent).catch(() => "");
+        if (out.includes("dogs")) break;
+        await new Promise((r) => setTimeout(r, 250));
+      }
+      const evs = await optPage.evaluate(() => window.__events || []);
+      return { out, tools: toolsOf(evs), idle: evs.some((e) => e.kind === "idle") };
+    };
+    const enterRun = await pressRow("Enter");
+    const spaceRun = await pressRow("Space");
+    check(
+      enterRun.out === "Results for: dogs" && enterRun.tools.includes("type_text") && enterRun.idle &&
+        spaceRun.out === "Results for: dogs" && spaceRun.tools.includes("type_text") && spaceRun.idle,
+      `workflows: Enter and Space run the focused row (Enter out "${enterRun.out}", tools ${JSON.stringify(enterRun.tools)}, idle ${enterRun.idle}; Space out "${spaceRun.out}", tools ${JSON.stringify(spaceRun.tools)}, idle ${spaceRun.idle})`,
+    );
+    // Running the row closes the menu, so the Escape check opens it again.
+    await wfPanel.click("#workflows-btn");
+    await wfPanel.waitForSelector("#wf-menu:not([hidden]) .wf-item", { timeout: 5000 }).catch(() => {});
     await wfPanel.keyboard.press("Escape");
     await wfPanel.waitForSelector("#wf-menu", { state: "hidden", timeout: 5000 }).catch(() => {});
     const wfEsc = await wfPanel.evaluate(() => ({
@@ -1633,24 +1812,11 @@ async function main() {
     }));
     check(
       wfEsc.hidden && wfEsc.expanded === "false" && wfEsc.active === "workflows-btn",
-      `workflows: Esc closes and returns focus to the button (${JSON.stringify(wfEsc)})`,
+      `workflows: Esc closes and returns focus to the button (hidden ${wfEsc.hidden}, expanded "${wfEsc.expanded}", focus "${wfEsc.active}")`,
     );
-    // A document listener added at open and never removed fires on every later
-    // Escape: open, Escape, open, Escape, then one Escape with nothing open, and
-    // focus must stay on the button.
-    await wfPanel.click("#workflows-btn");
-    await wfPanel.waitForSelector("#wf-menu:not([hidden]) .wf-item", { timeout: 5000 }).catch(() => {});
-    await wfPanel.keyboard.press("Escape");
-    await wfPanel.waitForSelector("#wf-menu", { state: "hidden", timeout: 5000 }).catch(() => {});
-    await wfPanel.keyboard.press("Escape");
-    const wfLeak = await wfPanel.evaluate(() => ({
-      hidden: document.getElementById("wf-menu").hidden,
-      active: document.activeElement && document.activeElement.id,
-    }));
-    check(
-      wfLeak.hidden && wfLeak.active === "workflows-btn",
-      `workflows: the Escape listener does not outlive the menu (${JSON.stringify(wfLeak)})`,
-    );
+    // The row checks needed a second row; the seed goes back to the one recorded
+    // workflow, so a later scenario sees the state it was written against.
+    await optPage.evaluate(([key, cfg]) => chrome.storage.local.set({ [key]: cfg }), [STORAGE_KEY, { ...config, workflows: [wf] }]);
     await wfPanel.close();
 
     // --- An unsaved recording survives closing the panel ---
@@ -2178,7 +2344,7 @@ async function main() {
       await optPage.evaluate(([key, i]) => chrome.storage.local.set({ [key]: i }), [SESSIONS_INDEX_KEY, histIdx]);
       check(
         keep.role === "status" && keep.text === "Chat deleted." && keep.inMenu && keep.cls === keepRow.cls,
-        `sessions: a passive refresh keeps .hist-status and focus (${JSON.stringify(keep)}, focus was ${JSON.stringify(keepRow)})`,
+        `sessions: a passive refresh keeps .hist-status and focus (role "${keep.role}", text "${keep.text}", in menu ${keep.inMenu}, focus cls "${keep.cls}", was "${keepRow.cls}")`,
       );
       // Close it the way a keyboard user does, so the rest of the scenario starts
       // with the menu closed and focus on the button, as it did before.
@@ -2208,7 +2374,7 @@ async function main() {
         const first = document.querySelector("#messages .note, #messages .msg");
         return { firstIsNote: !!first && first.classList.contains("note") && first.textContent.includes(note), users: document.querySelectorAll(".msg.user").length };
       }, TRIMMED_NOTE);
-      check(trimView.firstIsNote && trimView.users === 1, `sessions: a chat saved trimmed says older messages weren't kept (got ${JSON.stringify(trimView)})`);
+      check(trimView.firstIsNote && trimView.users === 1, `sessions: a chat saved trimmed says older messages weren't kept (first is the trimmed note ${trimView.firstIsNote}, ${trimView.users} user messages)`);
       await panelSend(p2, "What model are you?", await assistantCount(p2));
       h = await readHistory();
       const trimBody = h.bodies["trimmed-chat"] || {};
@@ -2329,7 +2495,7 @@ async function main() {
       // H22
       await p4.waitForFunction(() => !document.querySelector("#messages .msg"), null, { timeout: 5000 }).catch(() => {});
       const h22 = await p4.evaluate(() => ({ msgs: document.querySelectorAll("#messages .msg").length, empty: !document.getElementById("empty-state").hidden }));
-      check(h22.msgs === 0 && h22.empty, `sessions: Clear all empties the open chat (got ${JSON.stringify(h22)})`);
+      check(h22.msgs === 0 && h22.empty, `sessions: Clear all empties the open chat (${h22.msgs} messages, empty state ${h22.empty})`);
     } catch (e) {
       check(false, `sessions: side-panel flow threw: ${e.message}`);
     } finally {
@@ -2435,7 +2601,7 @@ async function main() {
         running: !document.getElementById("stop-btn").hidden,
         notes: [...document.querySelectorAll(".note")].filter((n) => n.textContent.includes("mock-model-4")).length,
       }));
-      check(midRun.running && midRun.notes === 0, `model-switch: no note while the old model's reply is still streaming (${JSON.stringify(midRun)})`);
+      check(midRun.running && midRun.notes === 0, `model-switch: no note while the old model's reply is still streaming (running ${midRun.running}, ${midRun.notes} notes naming the new model)`);
       const held = await panelIdle(mPanel, beforeHold);
       await mPanel.waitForTimeout(300);
       const afterRun = await mPanel.evaluate(() => {
@@ -2450,7 +2616,7 @@ async function main() {
       });
       check(
         held > 0 && afterRun.notes === 1 && afterRun.afterReply && /done holding/.test(afterRun.reply),
-        `model-switch: the held note shows once, after the finished reply, naming the new model (${JSON.stringify(afterRun)})`,
+        `model-switch: the held note shows once, after the finished reply, naming the new model (${afterRun.notes} notes, after the reply ${afterRun.afterReply}, reply "${afterRun.reply}")`,
       );
       await mPanel.click(".note button.note-action");
       await mPanel.waitForTimeout(300);
@@ -2459,7 +2625,7 @@ async function main() {
         notes: document.querySelectorAll(".note").length,
         empty: !document.getElementById("empty-state").hidden,
       }));
-      check(afterNew.msgs === 0 && afterNew.notes === 0 && afterNew.empty, `model-switch: the note's New chat clears the chat (got ${JSON.stringify(afterNew)})`);
+      check(afterNew.msgs === 0 && afterNew.notes === 0 && afterNew.empty, `model-switch: the note's New chat clears the chat (${afterNew.msgs} messages, ${afterNew.notes} notes, empty state ${afterNew.empty})`);
 
       // A switch made while the panel is closed is noted when it reopens on the
       // restored chat.
@@ -2590,8 +2756,8 @@ async function main() {
     const chipText2 = await chipPanel.$eval("#context-hint", (e) => e.textContent).catch(() => "");
     check(/allowed/.test(chipText2) && !/not allowed yet/.test(chipText2), `site-chip: chip reflects the new rule (got "${chipText2}")`);
     // The chip's menu gets the same contract as the other two: a name, focus inside
-    // on open, and Escape back to the chip. The rule rows are real buttons, so the
-    // open check also proves focus went to a rule, not to the container.
+    // on open, Escape back to the chip. The rows are real buttons, so focus inside
+    // in its weakest form is not enough — the open check names the rule that took focus.
     await chipPanel.click("#context-hint");
     await chipPanel.waitForSelector('#site-menu button[data-rule="allow"]', { timeout: 5000 }).catch(() => {});
     const siteOpen = await chipPanel.evaluate(() => ({
@@ -2607,9 +2773,12 @@ async function main() {
     check(
       siteOpen.role === "dialog" && siteOpen.label === "Site rules" && siteOpen.tab === "-1" &&
         siteOpen.popup === "dialog" && siteOpen.expanded === "true" && siteOpen.controls === "site-menu",
-      `site chip: the menu is a named dialog and its trigger describes it (${JSON.stringify(siteOpen)})`,
+      `site chip: the menu is a named dialog and its trigger describes it (role "${siteOpen.role}", label "${siteOpen.label}", tabindex "${siteOpen.tab}", popup "${siteOpen.popup}", expanded "${siteOpen.expanded}", controls "${siteOpen.controls}")`,
     );
-    check(siteOpen.focusIn, `site chip: focus lands inside on open (rule button "${siteOpen.focusRule}")`);
+    check(
+      siteOpen.focusIn && siteOpen.focusRule === "allow",
+      `site chip: focus lands inside on open on the Trust rule (in menu ${siteOpen.focusIn}, rule "${siteOpen.focusRule}")`,
+    );
     await chipPanel.keyboard.press("Escape");
     await chipPanel.waitForSelector("#site-menu", { state: "hidden", timeout: 5000 }).catch(() => {});
     const siteEsc = await chipPanel.evaluate(() => ({
@@ -2619,7 +2788,7 @@ async function main() {
     }));
     check(
       siteEsc.hidden && siteEsc.expanded === "false" && siteEsc.active === "context-hint",
-      `site chip: Esc closes and returns focus to the chip (${JSON.stringify(siteEsc)})`,
+      `site chip: Esc closes and returns focus to the chip (hidden ${siteEsc.hidden}, expanded "${siteEsc.expanded}", focus "${siteEsc.active}")`,
     );
     await chipPanel.close();
 
@@ -2892,7 +3061,7 @@ async function main() {
       titleVisible: !!document.querySelector(".empty-title")?.checkVisibility(),
       noticeVisible: !!document.getElementById("not-configured")?.checkVisibility(),
     }));
-    check(gateEmpty.examplesHidden && gateEmpty.titleVisible && gateEmpty.noticeVisible, `gate: the suggestions hide, the question line and the notice show (got ${JSON.stringify(gateEmpty)})`);
+    check(gateEmpty.examplesHidden && gateEmpty.titleVisible && gateEmpty.noticeVisible, `gate: the suggestions hide, the question line and the notice show (examples hidden ${gateEmpty.examplesHidden}, title visible ${gateEmpty.titleVisible}, notice visible ${gateEmpty.noticeVisible})`);
 
     // (3) The composer's approval selector sets autonomy without opening Settings.
     const initialMode = await gatePanel.$eval("#autonomy .seg.active", (el) => el.dataset.mode).catch(() => "");
@@ -2929,6 +3098,11 @@ async function main() {
     // aria-pressed="true" stays on exactly one button: the stored mode's segment.
     const pressedOnce = (p, mode) =>
       p && p.active === mode && p.pressed.filter((x) => x === "true").length === 1 && p.pressed.indexOf("true") === ["plan", "ask", "auto"].indexOf(mode);
+    // A roving tabindex keeps exactly one segment a tab stop, on the segment that
+    // holds focus — that is what lets Tab leave the group. AC-24 says "wrap at the
+    // ends", so both ends are walked: the stop has to be on the segment focus lands
+    // on, before and after roving.
+    const oneStop = (p, mode) => p && p.stops.filter((t) => t === 0).length === 1 && p.stops.indexOf(0) === ["plan", "ask", "auto"].indexOf(mode);
     const readMode = (pg) =>
       pg
         .evaluate((key) => chrome.storage.local.get(key).then((r) => (r[key] && r[key].settings ? r[key].settings.autonomy : "")), STORAGE_KEY)
@@ -2942,25 +3116,26 @@ async function main() {
     const r2 = await segProbe(gatePanel);
     await gatePanel.keyboard.press("ArrowLeft");
     const r3 = await segProbe(gatePanel);
+    await gatePanel.keyboard.press("ArrowLeft"); // Plan is the first, so this wraps back to Auto
+    const r4 = await segProbe(gatePanel);
+    const seq = [r0, r1, r2, r3, r4];
     check(
-      pressedOnce(r0, "auto") &&
-        pressedOnce(r1, "auto") &&
-        pressedOnce(r2, "auto") &&
-        pressedOnce(r3, "auto") &&
+      seq.every((p) => p && pressedOnce(p, "auto") && oneStop(p, p.focus)) &&
         r0?.focus === "auto" &&
         r1?.focus === "plan" &&
         r2?.focus === "ask" &&
-        r3?.focus === "plan",
-      `composer: arrows rove the approval group (focus ${[r0, r1, r2, r3].map((p) => (p ? p.focus : "?")).join("→")}, pressed once ${[r0, r1, r2, r3].map((p) => pressedOnce(p, "auto")).join(",")})`,
+        r3?.focus === "plan" &&
+        r4?.focus === "auto",
+      `composer: arrows rove the approval group and wrap at both ends (focus ${seq.map((p) => (p ? p.focus || "?" : "?")).join("→")}, pressed once ${seq.map((p) => pressedOnce(p, "auto")).join(",")}, stops ${seq.map((p) => JSON.stringify(p && p.stops)).join(" ")})`,
     );
-    // Tab from the first segment, where roving left the focus: Tab is not
-    // consumed, so the group keeps its exit. Without roving the focus never moves
-    // off Auto, so this check is red for the same reason the arrow check is.
+    // Tab from Auto, where the left wrap left the focus: Tab is not consumed, so the
+    // group keeps its exit. Without roving the focus never moves off Auto, so this
+    // check is red for the same reason the arrow check is.
     await gatePanel.keyboard.press("Tab");
     const tabbed = await segProbe(gatePanel);
     check(
-      r3?.focus === "plan" && tabbed && tabbed.outside && !tabbed.isSeg,
-      `composer: Tab still crosses the approval group (from "${r3 && r3.focus}", landed "${tabbed && tabbed.where}", outside ${tabbed && tabbed.outside}, isSeg ${tabbed && tabbed.isSeg}, stops ${JSON.stringify(tabbed && tabbed.stops)})`,
+      r4?.focus === "auto" && tabbed && tabbed.outside && !tabbed.isSeg,
+      `composer: Tab still crosses the approval group (from "${r4 && r4.focus}", landed "${tabbed && tabbed.where}", outside ${tabbed && tabbed.outside}, isSeg ${tabbed && tabbed.isSeg}, stops ${JSON.stringify(tabbed && tabbed.stops)})`,
     );
     // Roving moved focus, not the mode; the click persists it.
     const rovedMode = await readMode(gatePanel);

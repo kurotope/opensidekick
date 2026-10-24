@@ -51,23 +51,16 @@ const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
 // after an edit can't fight a user who just folded it away.
 const autoOpened = new Set();
 
-// A label's `for` and the field's `id` come from stored records: loadConfig
-// copies providers, prompts, tasks and servers verbatim, with no validation, so
-// a record id carrying a quote, a `<` or a space would build an id that
-// document.getElementById can never match and a for= that resolves to nothing.
-// Keep only the characters an id may hold. The sanitised value is the one that
-// goes into the page, and it never goes into a selector string.
-const safeId = (raw) => String(raw ?? "").toLowerCase().replace(/[^a-z0-9_-]/g, "");
+// ids come from stored records, verbatim, so a record id with a quote builds an id
+// nothing can match: keep only id-safe characters, never a stored value in a selector.
+const safeId = (raw) => String(raw ?? "").replace(/[^a-z0-9_-]/g, "");
 
-// Ids are unique across the page: seed the pool with the ids already in the DOM
-// (each list re-renders only its own rows), and take the first value that is
-// free, so a config that stores the same id twice — loadConfig does not dedupe —
-// does not make two rows share a name. getElementById takes the first match, so
-// sharing is the silent failure this prevents.
+// The pool keeps ids unique across the page: loadConfig does not dedupe, and
+// getElementById takes the first match, so two records sharing an id share a name.
 function makeIdPool() {
   const taken = new Set(Array.from(document.querySelectorAll("[id]"), (el) => el.id));
   return (base) => {
-    const stem = safeId(base) || "field";
+    const stem = safeId(base); // every base starts with a prefix, so the stem is never empty
     let id = stem;
     for (let n = 2; taken.has(id); n++) id = `${stem}-${n}`;
     taken.add(id);
@@ -197,7 +190,7 @@ function renderProviders() {
   // (the side panel saving a workflow) must not swallow the user's test.
   const wasTesting = [];
   for (const [card, state] of autoTests) {
-    if (state.controller) wasTesting.push(card.dataset.id);
+    if (state.controller) wasTesting.push(card);
     stopTest(card);
   }
   autoTests.clear();
@@ -206,6 +199,13 @@ function renderProviders() {
 
   const tpl = $("#provider-template");
   const newId = makeIdPool();
+  // The rebuild is keyed by the raw stored id in a Map, so a record id carrying a
+  // quote is matched by ===, which cannot break. A rebuilt card is looked up here
+  // rather than by a data-id selector: `.provider[data-id="a"b<c>"]` is a
+  // SyntaxError, renderProviders() aborts at the restart loop below, and
+  // renderDecisions() never runs — the smart checks on a page that holds API keys
+  // stop rendering.
+  const rebuilt = new Map();
   for (const provider of config.providers) {
     const node = tpl.content.firstElementChild.cloneNode(true);
     node.dataset.id = provider.id;
@@ -218,9 +218,8 @@ function renderProviders() {
     radio.checked = active;
     radio.addEventListener("change", () => setActive(provider.id));
 
-    // The label is wired from this node, never from a rebuilt data-id selector:
-    // a provider id holding a quote breaks that selector, and the pair has to be
-    // written from one value so the for= can't drift from the id.
+    // The label is wired from this node, never from a rebuilt data-id selector: a
+    // provider id holding a quote breaks that selector.
     const baseId = newId(`base-url-${provider.id}`);
     const baseUrl = node.querySelector(".base-url");
     baseUrl.id = baseId;
@@ -259,10 +258,8 @@ function renderProviders() {
     const modelInput = node.querySelector(".model");
     const datalist = node.querySelector("datalist");
     const modelId = newId(`model-${provider.id}`);
-    // The datalist id used to be "models-" + provider.id: same record, same
-    // unsanitised value, and a list attribute pointing at nothing for a record
-    // id Chrome cannot match. Both ids come from the pool, so no two cards share
-    // a model field or a datalist.
+    // Both ids come from the pool, so no two cards share a model field or a datalist
+    // (the datalist id used to be the raw record value, which a list attribute cannot match).
     const listId = newId(`models-${provider.id}`);
     modelInput.id = modelId;
     node.querySelector(".model-label").htmlFor = modelId;
@@ -295,12 +292,16 @@ function renderProviders() {
 
     node.querySelector(".delete-provider").addEventListener("click", () => removeProvider(provider.id));
 
+    rebuilt.set(provider.id, node);
     providerList.appendChild(node);
   }
-  for (const id of wasTesting) {
+  // A run in flight is restarted on the node carried in wasTesting, matched through
+  // rebuilt — the stored id never goes into a selector string.
+  for (const card of wasTesting) {
+    const id = card.dataset.id;
     const provider = config.providers.find((p) => p.id === id);
-    const card = providerList.querySelector(`.provider[data-id="${id}"]`);
-    if (provider && card) scheduleAutoTest(provider, card, { immediate: true });
+    const node = rebuilt.get(id);
+    if (provider && node) scheduleAutoTest(provider, node, { immediate: true });
   }
   // The smart-checks key source points at one of these, by id.
   renderDecisions();
@@ -1021,7 +1022,6 @@ function renderScheduled() {
       prompt: newId(`s-prompt-${t.id}`),
       url: newId(`s-url-${t.id}`),
       interval: newId(`s-interval-${t.id}`),
-      enabled: newId(`s-enabled-${t.id}`),
     };
     const row = document.createElement("div");
     row.className = "sched-item";
@@ -1035,7 +1035,7 @@ function renderScheduled() {
           <input type="number" class="s-interval" id="${ids.interval}" min="1" />
           <div class="interval-hint">60 = hourly · 360 = every 6h · 1440 = daily · 10080 = weekly</div>
         </div>
-        <div><label>&nbsp;</label><label class="enabled-label"><input type="checkbox" class="s-enabled" id="${ids.enabled}" /> Enabled</label></div>
+        <div><label>&nbsp;</label><label class="enabled-label"><input type="checkbox" class="s-enabled" /> Enabled</label></div>
       </div>
       <div class="sched-actions">
         <button class="btn btn-ghost small s-run">Run now</button>
@@ -1139,7 +1139,6 @@ function renderMcp() {
       name: newId(`m-name-${m.id}`),
       url: newId(`m-url-${m.id}`),
       token: newId(`m-token-${m.id}`),
-      enabled: newId(`m-enabled-${m.id}`),
     };
     const row = document.createElement("div");
     row.className = "sched-item";
@@ -1148,7 +1147,7 @@ function renderMcp() {
       <div class="field"><label for="${ids.url}">Server URL</label><input class="m-url" id="${ids.url}" placeholder="https://…/mcp" /></div>
       <div class="field"><label for="${ids.token}">Auth token (optional)</label><input type="password" class="m-token" id="${ids.token}" placeholder="Bearer token, if the server needs one" autocomplete="off" /></div>
       <div class="sched-actions">
-        <label class="enabled-label"><input type="checkbox" class="m-enabled" id="${ids.enabled}" /> Enabled</label>
+        <label class="enabled-label"><input type="checkbox" class="m-enabled" /> Enabled</label>
         <button class="btn btn-ghost small m-test">Test</button>
         <button class="link-btn m-del">Remove</button>
       </div>

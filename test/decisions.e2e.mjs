@@ -690,7 +690,7 @@ async function main() {
       if (dailyAlarm) break;
       await new Promise((r) => setTimeout(r, 250));
     }
-    check(!!dailyAlarm && dailyAlarm.periodInMinutes === 1440, `alarms: the enabled daily task got an alarm (got ${JSON.stringify(dailyAlarm)})`);
+    check(!!dailyAlarm && dailyAlarm.periodInMinutes === 1440, `alarms: the enabled daily task got an alarm (alarm "${dailyAlarm?.name}", period ${dailyAlarm?.periodInMinutes} min)`);
     const armed = await arm();
     check(armed.armed, "change-only: chrome.notifications.create is observable in the service worker");
     runScheduled.since = 0;
@@ -775,10 +775,13 @@ async function main() {
     // A card lands at the end of #messages, and stealing focus mid-sentence sends
     // the keystrokes to its button (threat 5). The exact rule: the primary button
     // takes focus only when focus is on document.body, or inside #messages. After
-    // a choice the buttons are replaced by a note, so the note owns the focus and
-    // carries tabindex="-1" so a <p> can receive it (threat 12).
-    const focusOf = () =>
-      panel.evaluate(() => {
+    // a choice the buttons are replaced by a note, so the note owns the focus. The
+    // note's tabindex="-1" (threat 12) is not asserted: a <p> without a tabindex
+    // cannot be focused, so a focused element carrying the note's class proves it.
+    // focusOf takes the page: the save-workflow card check runs in a second panel
+    // (two cards open at once), so the probe has to follow the transcript.
+    const focusOf = (pg) =>
+      pg.evaluate(() => {
         const a = document.activeElement;
         return {
           id: a.id,
@@ -786,8 +789,6 @@ async function main() {
           text: (a.textContent || "").replace(/\s+/g, " ").trim().slice(0, 24),
           note: a.classList.contains("muted-note"),
           inMsg: document.getElementById("messages").contains(a),
-          tab: a.getAttribute("tabindex"),
-          cards: document.querySelectorAll(".perm-card").length,
         };
       });
     // Every wait carries a catch: in a red run the assertion has to be reached,
@@ -800,36 +801,31 @@ async function main() {
     await panel.evaluate(() => document.activeElement.blur());
     await askOnce(90003);
     await cardsAtLeast(3);
-    const bodyFocus = await focusOf();
+    const bodyFocus = await focusOf(panel);
     check(
       bodyFocus.tag === "BUTTON" && bodyFocus.text === "Allow once" && bodyFocus.inMsg,
-      `panel: a permission card takes focus to Allow once (${JSON.stringify(bodyFocus)})`,
+      `panel: a permission card takes focus to Allow once (tag "${bodyFocus.tag}", text "${bodyFocus.text}", in #messages ${bodyFocus.inMsg})`,
     );
 
-    // 2. Mid-typing: a card landing must not pull the keystrokes out of the composer.
-    await panel.click("#input");
-    await panel.type("#input", "find the contact email");
-    await askOnce(90004);
-    await cardsAtLeast(4);
-    const typingFocus = await focusOf();
-    check(typingFocus.id === "input", `panel: a card appearing mid-typing keeps focus in the composer (${JSON.stringify(typingFocus)})`);
-
-    // 3. Mid-slash-menu: the open list lives inside the composer, so the same rule
-    // holds. It is reachable in this suite because the config seed carries prompts.
+    // 2. Mid-typing, with the slash menu open: the open list lives inside the
+    // composer, so the rule is one predicate for both moments — a card landing
+    // must not pull the keystrokes out, and the composer keeps focus while the user
+    // types. The menu is seeded so it is really open, and the check says so.
     await seed({ prompts: [{ id: "p1", command: "summarize", text: "Summarize this page in 3 bullets." }] });
+    await panel.click("#input");
     await panel.fill("#input", "");
     await panel.type("#input", "/sum");
     await panel.waitForSelector("#slash-menu .slash-item", { timeout: 4000 }).catch(() => {});
-    await askOnce(90005);
-    await cardsAtLeast(5);
-    const slashFocus = await focusOf();
+    await askOnce(90004);
+    await cardsAtLeast(4);
+    const typingFocus = await focusOf(panel);
     const slashOpen = await panel.evaluate(() => !document.getElementById("slash-menu").hidden);
     check(
-      slashFocus.id === "input" && slashOpen,
-      `panel: a card during an open slash menu leaves the composer focused (${JSON.stringify(slashFocus)}, menu open ${slashOpen})`,
+      typingFocus.id === "input" && slashOpen,
+      `panel: a card mid-typing with the slash menu open keeps focus in the composer (focus "${typingFocus.id}", menu open ${slashOpen})`,
     );
 
-    // 4. A choice removes the buttons, so the tab order needs a landing point.
+    // 3. A choice removes the buttons, so the tab order needs a landing point.
     const notesBefore = await panel.$$eval(".perm-card .muted-note", (els) => els.length);
     // The keyboard path is the faithful one: focus lands on the card's button
     // (inside #messages) and Enter fires it. A mouse click on a card row sitting
@@ -841,16 +837,39 @@ async function main() {
     await panel
       .waitForFunction((n) => document.querySelectorAll(".perm-card .muted-note").length > n, notesBefore, { timeout: 5000 })
       .catch(() => {});
-    const noteFocus = await focusOf();
+    const noteFocus = await focusOf(panel);
     check(
-      noteFocus.note && noteFocus.tab === "-1",
-      `panel: after a choice focus lands on the note (${JSON.stringify(noteFocus)})`,
+      noteFocus.note,
+      `panel: after a choice focus lands on the note (tag "${noteFocus.tag}", note ${noteFocus.note}, text "${noteFocus.text}")`,
     );
 
-    // 5. Threat 11: two save-workflow cards can be open at once — the panel
+    // 3b. AC-20 names this rule for all three cards, not just the permission card:
+    // showPlan replaces .perm-buttons with the same choiceNote and calls the same
+    // focusIfTranscript. Coded and unasserted, so a change that drops focus on the
+    // plan note ships green. Same fields as the card check — tag, class, text.
+    await optPage.evaluate(([t, r]) => chrome.runtime.sendMessage({ type: t, ...r }), [
+      MSG.PLAN_REQUEST,
+      { id: 90006, plan: { summary: "Search for cats", steps: ["Read the page", "Click Search"], domains: ["shop.example"] } },
+    ]);
+    await panel.waitForSelector('.plan-card button[data-approved="1"]', { timeout: 5000 }).catch(() => {});
+    await panel.locator(".plan-card").last().locator('button[data-approved="1"]').focus().catch(() => {});
+    await panel.keyboard.press("Enter").catch(() => {});
+    await panel
+      .waitForFunction(() => !!document.querySelector(".plan-card .muted-note"), null, { timeout: 5000 })
+      .catch(() => {});
+    const planFocus = await focusOf(panel);
+    // "Approved." is in the assertion so the check proves Approve ran, not that
+    // some note happened to be focusable.
+    check(
+      planFocus.tag === "P" && planFocus.note && planFocus.text === "Approved.",
+      `plan: after Approve focus lands on the note (tag "${planFocus.tag}", note ${planFocus.note}, text "${planFocus.text}")`,
+    );
+
+    // 4. Threat 11: two save-workflow cards can be open at once — the panel
     // re-offers an unsaved recording when it opens, and a fresh Stop makes the
-    // second. The name field sits inside each card, so its id must be per card:
-    // getElementById takes the first match, which is the other card's field.
+    // second. The name field sits inside each card and carries no id, so the
+    // guarantee is asserted as the guarantee, not as an id shape: no id repeats
+    // across the two cards, and every name field has a name through its label.
     // Recording starts from the panel's own Record button: the banner is the
     // panel's own state, so a start fired from the options page leaves it hidden.
     await optPage.evaluate(([k, v]) => chrome.storage.session.set({ [k]: v }), [
@@ -876,17 +895,36 @@ async function main() {
       .waitForFunction(() => document.querySelectorAll("#messages .perm-card").length >= 2, null, { timeout: 5000 })
       .catch(() => {});
     const ids = await wfPanel.evaluate(() => {
-      const list = [...document.querySelectorAll("#messages [id]")].map((el) => el.id);
+      // The field has no id, so its name is the label that wraps it: the check
+      // reads that label's text, not a for= pointing at an id. The cards carry no
+      // ids at all, so a duplicate-id clause here can never go red — the guarantee
+      // is the two fields and the label that names each.
+      const fields = [...document.querySelectorAll("#messages .wf-name-input")];
+      const labelOf = (f) => (f.closest("label") || { textContent: "" }).textContent.trim();
       return {
         cards: document.querySelectorAll("#messages .perm-card").length,
-        banner: (document.getElementById("rec-banner").textContent || "").replace(/\s+/g, " ").trim(),
-        list,
-        dupes: list.filter((id, i) => list.indexOf(id) !== i),
+        fields: fields.length,
+        labels: fields.map(labelOf),
       };
     });
     check(
-      ids.cards >= 2 && ids.dupes.length === 0,
-      `panel: no duplicate id in #messages (${JSON.stringify(ids)})`,
+      ids.cards >= 2 && ids.fields === 2 && ids.labels.every((l) => l === "Workflow name"),
+      `panel: each name field in #messages is named by its label (${ids.cards} cards, ${ids.fields} name fields, labels ${ids.labels.join(" | ")})`,
+    );
+    // Save is the third card AC-20 names, and it is coded the same way as the other
+    // two (choiceNote + focusIfTranscript). Saving here also proves the note is the
+    // one the Save handler wrote, not a note from the other card.
+    const saveCard = wfPanel.locator(".perm-card").last();
+    await saveCard.locator(".wf-name-input").fill("Cats search").catch(() => {});
+    await saveCard.locator('button[data-save="1"]').focus().catch(() => {});
+    await wfPanel.keyboard.press("Enter").catch(() => {});
+    await wfPanel
+      .waitForFunction(() => !!document.querySelector("#messages .muted-note"), null, { timeout: 5000 })
+      .catch(() => {});
+    const wfNoteFocus = await focusOf(wfPanel);
+    check(
+      wfNoteFocus.tag === "P" && wfNoteFocus.note && wfNoteFocus.text.startsWith("Saved “Cats search"),
+      `workflows: after Save focus lands on the note (tag "${wfNoteFocus.tag}", note ${wfNoteFocus.note}, text "${wfNoteFocus.text}")`,
     );
     await wfPanel.close();
 
