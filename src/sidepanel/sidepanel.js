@@ -5,6 +5,7 @@ import {
   MSG,
   STORAGE_KEY,
   SESSION_PENDING_WF_KEY,
+  SESSION_PENDING_SHOT_KEY,
   SESSION_MODEL_KEY,
   PROMPT_HISTORY_KEY,
   PROMPT_HISTORY_MAX,
@@ -12,9 +13,10 @@ import {
   SESSIONS_MAX,
   SENSITIVE_NOTE,
   TRIMMED_NOTE,
+  CAPTURE_ROWS,
 } from "../common/constants.js";
 import { matchPrompts, isSlashQuery } from "../common/prompts.js";
-import { classifyFile, targetSize, acceptImage, sniffImageType, sourceAllowed, taskFor, IMAGE_TYPES, MAX_IMAGES, ATTACH_NOTES } from "../common/attachments.js";
+import { classifyFile, targetSize, acceptImage, sniffImageType, sourceAllowed, taskFor, IMAGE_TYPES, roomFor, ATTACH_NOTES } from "../common/attachments.js";
 import { escapeHtml } from "../common/escape.js";
 import { markdownToHtml, createStreamingRenderer, renderTick, CODE_CLASS, setHighlighter } from "../common/markdown.js";
 import { relativeTime } from "../background/sessions.js";
@@ -41,6 +43,8 @@ const els = {
   attach: document.getElementById("attach-btn"),
   attachInput: document.getElementById("attach-input"),
   attachStrip: document.getElementById("attach-strip"),
+  captureBtn: document.getElementById("capture-btn"),
+  captureMenu: document.getElementById("capture-menu"),
   send: document.getElementById("send-btn"),
   stop: document.getElementById("stop-btn"),
   newChat: document.getElementById("new-chat"),
@@ -118,6 +122,7 @@ async function init() {
   refreshConfigured();
   refreshContextHint();
   restorePendingWorkflow();
+  drainShots();
 
   chrome.runtime.onMessage.addListener((msg) => {
     if (msg.type === MSG.AGENT_EVENT) handleEvent(msg);
@@ -209,6 +214,7 @@ async function init() {
   // The picker's accept list is the same set the rules use, so the HTML cannot drift from the module.
   els.attachInput.accept = [...IMAGE_TYPES].join(",");
   els.attach.addEventListener("click", () => els.attachInput.click());
+  els.captureBtn.addEventListener("click", toggleCaptureMenu);
   els.attachInput.addEventListener("change", () => {
     addFiles(els.attachInput.files);
     els.attachInput.value = ""; // so picking the same file twice works
@@ -544,7 +550,10 @@ async function onSubmit(e) {
   autoGrow();
   refreshContextHint();
   const wasPending = newChatPending;
-  const reply = send({ type: MSG.RUN_TASK, task, images, newChat: wasPending });
+  // The origins the captures came from travel with the send, so the chat records which pages the
+  // user photographed. A pasted, dropped, or picked file has no origin and adds nothing.
+  const shotUrls = shotOrigins(images);
+  const reply = send({ type: MSG.RUN_TASK, task, images, ...(shotUrls.length ? { shotUrls } : {}), newChat: wasPending });
   newChatPending = false;
   setRunning(true);
   // Stop, New chat, then a quick send can land while the stopped run is still
@@ -572,6 +581,13 @@ async function onSubmit(e) {
 // Images waiting to be sent, as { mediaType, data } — the shape the screenshot tool produces.
 let pendingImages = [];
 let lastSentImages = [];
+
+// Which pages the pending captures are pictures of, read off the entries the worker parked. A
+// send names each site once, so one page captured twice is recorded once, and a shot of a frame
+// names the frame's own site next to the page that embedded it.
+function shotOrigins(images) {
+  return [...new Set(images.flatMap((i) => [i.origin, i.frameOrigin]).filter((o) => typeof o === "string" && o))];
+}
 
 // The strip is rebuilt from pendingImages on every change: a thumbnail and its remove button each.
 function renderAttachStrip() {
@@ -623,7 +639,7 @@ async function addFiles(files) {
     // The count gate above is read when the event lands, and several files land in the same
     // tick, each reading a count nothing has appended to yet. The cap is applied again at the
     // push, where the number is the current one.
-    if (pendingImages.length >= MAX_IMAGES) {
+    if (!roomFor(pendingImages.length)) {
       addNote(ATTACH_NOTES.count, "dot");
       continue;
     }
@@ -675,6 +691,103 @@ async function fileToImage(file) {
   }
 }
 
+// Shots the worker parked while the panel was closed. One drain, called at init and on the
+// shot event, so a capture taken with no panel visible is not lost and nothing lands twice.
+async function drainShots() {
+  try {
+    const raw = await chrome.storage.session.get(SESSION_PENDING_SHOT_KEY);
+    const shots = raw[SESSION_PENDING_SHOT_KEY];
+    if (!Array.isArray(shots) || shots.length === 0) return;
+    // Cleared before anything is appended: the drain is the only writer of the strip from this
+    // key, so a second call finds nothing left to append.
+    await chrome.storage.session.remove(SESSION_PENDING_SHOT_KEY);
+    for (const s of shots) {
+      // The worker's own gates re-checked here, because the panel is not the trust boundary.
+      const a = acceptImage(s);
+      if (!a.ok) {
+        addNote(ATTACH_NOTES[a.reason], "dot");
+        continue;
+      }
+      // The cap is applied at the append: a drained list is appended in one tick, and the
+      // number that gates each shot has to be the count that has been appended.
+      if (!roomFor(pendingImages.length)) {
+        addNote(ATTACH_NOTES.count, "dot");
+        continue;
+      }
+      // The drained entry keeps the origins the worker parked with the shot, so the send names
+      // every site this picture came from: the page it is a picture of, and a frame inside it.
+      pendingImages.push({ mediaType: a.mediaType, data: s.data, origin: s.origin, frameOrigin: s.frameOrigin });
+    }
+    renderAttachStrip();
+  } catch {
+    /* session storage unavailable — nothing parked to drain */
+  }
+}
+
+// One popup menu open at a time: the outside click, Escape, focus and aria-expanded wiring
+// lives here, so a menu supplies its button and rows instead of a copy of the guards.
+let popup = null;
+
+function popupOutside(e) {
+  if (!popup || popup.menu.contains(e.target) || popup.btn.contains(e.target)) return;
+  closePopup(false);
+}
+
+// Escape belongs to the menu while it is open.
+function popupEscape(e) {
+  if (e.key !== "Escape" || e.defaultPrevented) return;
+  e.preventDefault();
+  closePopup(true);
+}
+
+function openPopup(menu, btn, focusTarget) {
+  popup = { menu, btn };
+  menu.hidden = false;
+  btn.setAttribute("aria-expanded", "true");
+  document.addEventListener("mousedown", popupOutside, true);
+  document.addEventListener("keydown", popupEscape);
+  (focusTarget || menu.querySelector("button")).focus();
+}
+
+function closePopup(returnFocus) {
+  if (!popup) return;
+  const { menu, btn } = popup;
+  popup = null;
+  menu.hidden = true;
+  btn.setAttribute("aria-expanded", "false");
+  document.removeEventListener("mousedown", popupOutside, true);
+  document.removeEventListener("keydown", popupEscape);
+  if (returnFocus) btn.focus();
+}
+
+// The camera rows, rebuilt from the shared table on every open: a row is never a string this
+// panel kept from an older list, and a mode with no camera path has no row to show.
+function renderCaptureMenu() {
+  els.captureMenu.innerHTML = "";
+  for (const row of CAPTURE_ROWS) {
+    if (!row.panelLabel) continue;
+    const b = document.createElement("button");
+    b.type = "button";
+    b.dataset.mode = row.mode;
+    b.textContent = row.panelLabel;
+    b.addEventListener("click", () => captureFromRow(row.mode));
+    els.captureMenu.appendChild(b);
+  }
+}
+
+function toggleCaptureMenu() {
+  if (!els.captureMenu.hidden) return closePopup(true);
+  renderCaptureMenu();
+  openPopup(els.captureMenu, els.captureBtn);
+}
+
+// A row is the composer's own capture: the worker owns the pick, the crop, the note and the
+// park, so the panel names the mode and lets the one drain land the shot.
+function captureFromRow(mode) {
+  closePopup(true);
+  send({ type: MSG.CAPTURE, mode });
+}
+
 function readAsDataUrl(file) {
   return new Promise((res, rej) => {
     const fr = new FileReader();
@@ -690,10 +803,7 @@ function newChat() {
   clearTranscript();
   els.empty.hidden = false;
   newChatPending = true;
-  // Attachments belong to the chat being cleared, not to the next one.
-  pendingImages = [];
-  lastSentImages = [];
-  renderAttachStrip();
+  clearAttachments();
 }
 
 function clearTranscript() {
@@ -711,9 +821,16 @@ function resetChatView() {
   clearTranscript();
   els.empty.hidden = false;
   newChatPending = false;
+  clearAttachments();
+}
+
+// A shot parked while the panel was closed drains into the panel that opens next, so it belongs
+// to the chat being cleared: the strip and the parked key go together, in one place.
+function clearAttachments() {
   pendingImages = [];
   lastSentImages = [];
   renderAttachStrip();
+  chrome.storage.session.remove(SESSION_PENDING_SHOT_KEY).catch(() => {});
 }
 
 // -------------------------------------------------------------------------
@@ -764,6 +881,10 @@ function handleEvent(ev) {
       break;
     case "note":
       addNote(ev.text, ev.icon || "dot");
+      break;
+    case "shot":
+      // The worker parked it; the panel is the only place a shot becomes a chip.
+      drainShots();
       break;
     case "chat_reset":
       resetChatView();
@@ -1420,7 +1541,7 @@ async function restorePendingWorkflow() {
 
 function toggleWorkflowsMenu() {
   if (!els.wfMenu.hidden) return hideWorkflowsMenu();
-  hideHistoryMenu(false);
+  closePopup(false);
   loadWorkflows().then(renderWorkflowsMenu);
   document.addEventListener("mousedown", wfOutside, true);
 }
@@ -1514,45 +1635,22 @@ function wireHistoryMenu() {
   // focus), which isn't the user leaving.
   els.histMenu.addEventListener("focusout", (e) => {
     const to = e.relatedTarget;
-    if (to && !els.histMenu.contains(to) && !els.historyBtn.contains(to)) hideHistoryMenu(false);
+    if (to && !els.histMenu.contains(to) && !els.historyBtn.contains(to)) closePopup(false);
   });
 }
 
 async function toggleHistoryMenu() {
-  if (!els.histMenu.hidden) return hideHistoryMenu(false);
+  if (!els.histMenu.hidden) return closePopup(false);
   hideWorkflowsMenu();
   histStatus("");
   renderHistoryMenu(await listSessions());
   els.histMenu.style.top = `${Math.round(document.querySelector(".topbar").getBoundingClientRect().bottom) + 4}px`;
-  els.histMenu.hidden = false;
-  els.historyBtn.setAttribute("aria-expanded", "true");
-  document.addEventListener("mousedown", histOutside, true);
-  document.addEventListener("keydown", histEscape);
   const current = els.histBody.querySelector(".hist-item.current .hist-open:not(:disabled)");
-  (current || els.histBody.querySelector(".hist-open:not(:disabled)") || firstHistFocusable()).focus();
+  openPopup(els.histMenu, els.historyBtn, current || els.histBody.querySelector(".hist-open:not(:disabled)") || firstHistFocusable());
 }
 
-function histOutside(e) {
-  if (els.histMenu.contains(e.target) || els.historyBtn.contains(e.target)) return;
-  hideHistoryMenu(false);
-}
-
-// Esc from anywhere while it is open; the rename field and the inline confirms
-// handle their own Esc and stop it before it gets here.
-function histEscape(e) {
-  if (e.key !== "Escape" || e.defaultPrevented) return;
-  e.preventDefault();
-  hideHistoryMenu(true);
-}
-
-function hideHistoryMenu(returnFocus) {
-  if (els.histMenu.hidden) return;
-  els.histMenu.hidden = true;
-  els.historyBtn.setAttribute("aria-expanded", "false");
-  document.removeEventListener("mousedown", histOutside, true);
-  document.removeEventListener("keydown", histEscape);
-  if (returnFocus) els.historyBtn.focus();
-}
+// Esc from anywhere while it is open is the shared guard; the rename field and the inline
+// confirms handle their own Esc and stop it before it gets there.
 
 function histStatus(text) {
   els.histStatus.textContent = text;
@@ -1656,7 +1754,7 @@ function onHistoryKeydown(e) {
 
 async function openSession(id) {
   if (els.histBody.querySelector(".hist-item.current")?.dataset.id === id) {
-    hideHistoryMenu(false); // already the open chat
+    closePopup(false); // already the open chat
     els.input.focus();
     return;
   }
@@ -1666,7 +1764,7 @@ async function openSession(id) {
     if (res && (res.error === "not-found" || res.error === "disabled")) refreshHistoryMenu();
     return;
   }
-  hideHistoryMenu(false);
+  closePopup(false);
   // Same as New chat: this also drops a parked "Save this workflow?" card,
   // which comes back from storage.session the next time the panel opens.
   clearTranscript();

@@ -21,6 +21,11 @@ export const SESSION_CONVO_KEY = "opensidekick.conversation.v1";
 // discarded yet — so closing the side panel doesn't silently lose the steps.
 export const SESSION_PENDING_WF_KEY = "opensidekick.pendingWorkflow.v1";
 
+// chrome.storage.session key for shots the worker captured while the side panel
+// was closed — the panel drains this list into the composer when it opens, so a
+// capture taken with no panel visible is not lost.
+export const SESSION_PENDING_SHOT_KEY = "opensidekick.pendingShot.v1";
+
 // chrome.storage.local key for the composer's prompt history (shell-style
 // up/down recall). Survives browser restarts; capped, most recent last.
 export const PROMPT_HISTORY_KEY = "opensidekick.promptHistory.v1";
@@ -297,6 +302,7 @@ export const MSG = {
   START_RECORDING: "start_recording",
   STOP_RECORDING: "stop_recording",
   GET_STATE: "get_state",
+  CAPTURE: "capture", // { mode } -> the worker crops the page the sender is looking at
   // side panel / options -> worker: chat history
   LIST_SESSIONS: "list_sessions",
   OPEN_SESSION: "open_session",
@@ -317,4 +323,15 @@ export const MSG = {
   CS_ACT: "cs_act",
   CS_PING: "cs_ping",
   CS_OVERLAY: "cs_overlay",
+  CS_CAPTURE: "cs_capture", // { mode } -> the box the user picked, or a refusal
 };
+
+// The capture rows in one table, so the page's right-click menu and the composer's camera menu
+// cannot drift from the modes a capture accepts, and a row's wording is written once.
+// A row with no id is no page-menu item, and a row with no panelLabel is no camera row.
+export const CAPTURE_ROWS = [
+  { id: "capture-visible", mode: "visible", title: "Capture visible area", panelLabel: "Visible area" },
+  { id: "capture-element", mode: "rightclick", title: "Capture this element", panelLabel: null },
+  { id: null, mode: "element", title: null, panelLabel: "Element" },
+  { id: "capture-region", mode: "region", title: "Capture a region", panelLabel: "Region" },
+];

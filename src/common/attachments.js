@@ -35,6 +35,13 @@ export const MAX_LONG_EDGE = 1568;
 // sizeable slice of a 128k window.
 export const MAX_IMAGES = 4;
 
+// The count rule for an append, so the paste gate, the strip, the drain and the parked key
+// all refuse a fifth image by one rule, and the cap cannot drift between them.
+/** room for one more image in a list that holds `count`. */
+export function roomFor(count) {
+  return count < MAX_IMAGES;
+}
+
 export const ATTACH_NOTES = {
   type: "Not an image — PNG, JPEG, WebP or GIF only.",
   size: "Image too large — over 5 MB. Resize it and try again.",
@@ -96,7 +103,7 @@ export function classifyFile(file, count) {
   const type = canonicalType(file && file.type);
   if (!IMAGE_TYPES.has(type)) return { ok: false, reason: "type" };
   if (Number(file.size) > MAX_FILE_BYTES) return { ok: false, reason: "size" };
-  if (count >= MAX_IMAGES) return { ok: false, reason: "count" };
+  if (!roomFor(count)) return { ok: false, reason: "count" };
   return { ok: true };
 }
 

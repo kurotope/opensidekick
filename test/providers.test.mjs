@@ -113,4 +113,24 @@ for (const type of ["openai", "anthropic"]) {
   assert(err && err.status === 403, `${type} listModels sets err.status (got ${err && err.status})`);
 }
 
+// ---- The wire carries only what the converters read: role, content and images ----
+// The capture's pixels reach the wire for both protocols; the origin that sits beside them in
+// the conversation is a history record, and its absence on the live body is read by the e2e suite.
+for (const type of ["openai", "anthropic"]) {
+  let wire = "";
+  globalThis.fetch = async (_url, opts) => {
+    wire = String(opts.body || "");
+    return fakeResponse(type === "openai" ? twoChunks : anthChunks);
+  };
+  await callModel(
+    { type, baseUrl: "https://x/v1", apiKey: "k" },
+    {
+      model: "m",
+      maxTokens: 100,
+      messages: [{ role: "user", content: "hi", images: [{ mediaType: "image/png", data: "QUJD" }], shotUrls: ["https://my.bank.test"] }],
+    },
+  );
+  assert(wire.includes("QUJD"), `${type} wire carries the capture's pixels (body ${wire.slice(0, 200)})`);
+}
+
 console.log(process.exitCode ? "\nSOME TESTS FAILED" : "\nALL TESTS PASSED");

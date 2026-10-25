@@ -63,6 +63,11 @@
       <symbol id="ic-attach" viewBox="0 0 24 24">
         <path d="M20 11.5l-8.5 8.5a5.5 5.5 0 0 1-7.8-7.8l8.5-8.5a5.5 5.5 0 0 1 7.8 7.8l-8.5 8.5a2.75 2.75 0 0 1-3.9-3.9l7.8-7.8" />
       </symbol>
+      <symbol id="ic-camera" viewBox="0 0 24 24">
+        <path d="M3.5 8h14a2.5 2.5 0 0 1 2.5 2.5v7a2.5 2.5 0 0 1-2.5 2.5h-14A2.5 2.5 0 0 1 1 17.5v-7A2.5 2.5 0 0 1 3.5 8z" />
+        <path d="M8.6 8l1.4-2.6h2.8L14.2 8" />
+        <circle cx="12" cy="13.5" r="3.4" />
+      </symbol>
       <symbol id="ic-history" viewBox="0 0 24 24">
         <path d="M4.5 12a7.5 7.5 0 1 0 2.4-5.5" />
         <path d="M4.2 4.8v3.4h3.4" />
@@ -146,6 +151,9 @@
     <form id="composer" class="composer">
       <div id="slash-menu" class="slash-menu" hidden></div>
       <div id="site-menu" class="site-menu" hidden></div>
+      <!-- A non-modal dialog over the composer. Its rows are built from the capture table, so
+           the wording here would be a copy, and none is written. -->
+      <div id="capture-menu" class="site-menu capture-menu" role="dialog" aria-label="Capture from this page" tabindex="-1" hidden></div>
       <!-- The field is the focal object: Send lives inside it, and the
            approval control sits directly underneath. -->
       <div class="composer-field">
@@ -162,6 +170,18 @@
             title="Attach an image — paste, drop, or click"
           >
             <svg class="ic" aria-hidden="true"><use href="#ic-attach" /></svg>
+          </button>
+          <button
+            type="button"
+            id="capture-btn"
+            class="capture-btn icon-btn"
+            aria-label="Capture from this page"
+            title="Capture from this page"
+            aria-haspopup="dialog"
+            aria-expanded="false"
+            aria-controls="capture-menu"
+          >
+            <svg class="ic" aria-hidden="true"><use href="#ic-camera" /></svg>
           </button>
           <span class="composer-hint"><kbd>/</kbd> saved prompts</span>
           <div class="composer-buttons">

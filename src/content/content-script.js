@@ -35,6 +35,11 @@
         case "cs_overlay":
           sendResponse(overlay(msg));
           return true;
+        case "cs_capture":
+          // A pick waits for the user, so the channel stays open until the commit, the
+          // cancel, or the refusal resolves it.
+          capture(msg.mode).then(sendResponse);
+          return true;
         case "cs_record":
           setRecording(!!msg.on);
           sendResponse({ ok: true });
@@ -507,27 +512,26 @@
   // #8b7dff for its dot. Inline styles only — the host page's CSP may reject
   // an injected <style>, and the pulse runs through the Web Animations API for
   // the same reason.
+  const ACCENT_RING = "box-shadow:inset 0 0 0 2px rgba(79,70,229,.85), inset 0 0 28px 8px rgba(79,70,229,.2);";
+  const PILL_SURFACE = "background:#1c1c1a;color:#ededec;border:1px solid rgba(255,255,255,.12);border-radius:999px;";
+  const PILL_TYPE = 'font:600 12px/16px system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;';
+
   const OVERLAY_CSS = {
     // A 2px ring reads as "active", not as the error state a 3px red-adjacent
     // glow used to.
-    ring:
-      "position:fixed;inset:0;pointer-events:none;z-index:2147483647;" +
-      "box-shadow:inset 0 0 0 2px rgba(79,70,229,.85), inset 0 0 28px 8px rgba(79,70,229,.2);",
+    ring: "position:fixed;inset:0;pointer-events:none;z-index:2147483647;" + ACCENT_RING,
     pill:
       "position:fixed;top:10px;left:50%;transform:translateX(-50%);pointer-events:auto;" +
       "display:flex;align-items:center;gap:8px;max-width:min(560px,86vw);" +
-      "background:#1c1c1a;color:#ededec;border:1px solid rgba(255,255,255,.12);" +
-      "padding:4px 4px 4px 12px;border-radius:999px;" +
+      PILL_SURFACE + "padding:4px 4px 4px 12px;" +
       "box-shadow:0 10px 30px -12px rgba(0,0,0,.65);",
     dot: "width:6px;height:6px;border-radius:50%;background:#8b7dff;flex:0 0 auto;",
-    label:
-      'font:600 12px/16px system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;' +
-      "white-space:nowrap;overflow:hidden;text-overflow:ellipsis;",
+    label: PILL_TYPE + "white-space:nowrap;overflow:hidden;text-overflow:ellipsis;",
     // Ghost, not solid red: Stop is the way out of a normal run, not an alarm.
     stop:
       "pointer-events:auto;background:transparent;color:#ededec;cursor:pointer;" +
       "min-height:28px;border:1px solid rgba(255,255,255,.32);border-radius:999px;padding:0 12px;" +
-      'font:600 12px/16px system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;',
+      PILL_TYPE,
   };
 
   function overlay(msg) {
@@ -581,6 +585,230 @@
     } catch (e) {
       /* no Web Animations — a static dot is fine */
     }
+  }
+
+  // -------------------------------------------------------------------------
+  // Capture picker — the user's own pointer names the box
+  // -------------------------------------------------------------------------
+
+  // Every pixel the pick paints is pointer-events:none, because elementFromPoint answers
+  // with the topmost pixel it sees: a highlight the pointer can land on would swallow the
+  // page element the user is aiming at.
+  const PICK_CSS = {
+    root: "position:fixed;inset:0;pointer-events:none;z-index:2147483647;",
+    ring: "position:fixed;pointer-events:none;z-index:2147483647;" + ACCENT_RING,
+    marquee:
+      "position:fixed;pointer-events:none;z-index:2147483647;border:2px solid rgba(79,70,229,.85);" +
+      "background:rgba(79,70,229,.14);",
+    hint: "position:fixed;pointer-events:none;z-index:2147483647;padding:4px 12px;" + PILL_SURFACE + PILL_TYPE,
+  };
+
+  // getBoundingClientRect is viewport-relative, so the box reported here needs no scroll
+  // offset for the worker to crop it.
+  function boxOf(el) {
+    const r = el.getBoundingClientRect();
+    return { x: r.x, y: r.y, w: r.width, h: r.height };
+  }
+
+  // A frame's own site is readable from the <iframe> element the top frame can see, so a shot of
+  // a frame names the site inside it as well as the page that embedded it.
+  function frameOriginOf(el) {
+    try {
+      return new URL(el.getAttribute("src") || location.href, location.href).origin;
+    } catch {
+      return null;
+    }
+  }
+
+  // Chrome's right-click menu data carries no element reference, so the element a
+  // right-click capture acts on is the one recorded here. Capture phase, because the page's
+  // own handler may swallow the event; the native menu is never prevented.
+  // isTrusted only: a contextmenu the page dispatches carries the same coordinates and names a
+  // target the user never pointed at.
+  let rightClick = null;
+  document.addEventListener(
+    "contextmenu",
+    (e) => {
+      if (!e.isTrusted) return;
+      const el = e.target;
+      // OpenSidekick's own pixels are never the user's target.
+      if (!el || el.closest("#opensidekick-overlay")) return;
+      rightClick = { el, tag: el.tagName.toLowerCase(), rect: boxOf(el) };
+    },
+    true
+  );
+
+  // The worker's climb is the rule, and this file cannot import it, so this list is capped to
+  // the boxes that rule can read — the target plus the levels it climbs. This file only reports
+  // boxes: the climb, the floor, and the notes stay in the worker.
+  function ancestorRects(el) {
+    const rects = [];
+    for (let node = el; node && rects.length < 5; node = node.parentElement) {
+      rects.push({ ...boxOf(node), tag: node.tagName.toLowerCase() });
+    }
+    return rects;
+  }
+
+  /** All four modes from one entry; a pick resolves on commit, cancel, or refusal. */
+  function capture(mode) {
+    if (mode === "cancel") {
+      const reply = { ok: false, mode, cancelled: true };
+      if (pick) releasePick(pick, reply);
+      return Promise.resolve(reply);
+    }
+    if (mode === "visible") {
+      const w = window.innerWidth;
+      const h = window.innerHeight;
+      return Promise.resolve({ ok: true, mode, rect: { x: 0, y: 0, w, h } });
+    }
+    if (mode === "rightclick") {
+      // The record is read once: it is the right-click this capture is acting on, so a capture
+      // with no new right-click has nothing to act on.
+      const rec = rightClick;
+      rightClick = null;
+      if (!rec || !document.contains(rec.el)) return Promise.resolve({ ok: false, mode, reason: "nothing" });
+      // A cross-origin frame's content cannot be read from this frame, so the only box the
+      // extension can report is the frame's own.
+      return Promise.resolve({
+        ok: true,
+        mode,
+        rect: rec.rect,
+        name: rec.tag,
+        rects: ancestorRects(rec.el),
+        frame: rec.tag === "iframe",
+        frameOrigin: rec.tag === "iframe" ? frameOriginOf(rec.el) : null,
+      });
+    }
+    if (mode === "element" || mode === "region") return startPick(mode);
+    return Promise.resolve({ ok: false, mode, reason: "nothing" });
+  }
+
+  let pick = null;
+
+  // Pixels out, the page's cursor back, reply last: the capture the worker takes is of a
+  // page with no OpenSidekick highlight on it.
+  function releasePick(state, reply) {
+    for (const d of state.pixels) d.remove();
+    if (state.madeRoot) state.host.remove();
+    document.documentElement.style.cursor = state.cursorWas;
+    for (const [type, fn] of state.listeners) document.removeEventListener(type, fn, true);
+    pick = null;
+    state.resolve(reply);
+  }
+
+  function startPick(mode) {
+    // One highlight per page: a second pick resolves the active one with its own reply.
+    if (pick) releasePick(pick, { ok: false, mode: pick.mode, cancelled: true });
+    return new Promise((resolve) => {
+      let host = document.getElementById("opensidekick-overlay");
+      const madeRoot = !host;
+      if (!host) {
+        host = document.createElement("div");
+        host.id = "opensidekick-overlay";
+        host.style.cssText = PICK_CSS.root;
+        document.documentElement.appendChild(host);
+      }
+      const pixels = [];
+      const addPixel = (id, css) => {
+        const d = document.createElement("div");
+        d.id = id;
+        d.style.cssText = css;
+        d.hidden = true;
+        host.appendChild(d);
+        pixels.push(d);
+        return d;
+      };
+      // cssText is appended, so the geometry overrides the token's own placement.
+      const paint = (d, x, y, w, h) => {
+        d.style.cssText += `left:${x}px;top:${y}px;` + (w ? `width:${w}px;height:${h}px;` : "");
+        d.hidden = false;
+      };
+      const ring = addPixel("opensidekick-pick-ring", PICK_CSS.ring);
+      const hint = mode === "element" ? addPixel("opensidekick-pick-hint", PICK_CSS.hint) : null;
+      const marquee = mode === "region" ? addPixel("opensidekick-pick-box", PICK_CSS.marquee) : null;
+      const cursorWas = document.documentElement.style.cursor;
+      // The page tells the user a pick is running, so the cursor is part of the pick.
+      document.documentElement.style.cursor = "crosshair";
+
+      const state = { mode, resolve, host, madeRoot, pixels, cursorWas, listeners: [] };
+      pick = state;
+      const bind = (type, fn) => {
+        document.addEventListener(type, fn, true);
+        state.listeners.push([type, fn]);
+      };
+      const commit = (extra) => {
+        releasePick(state, { ok: true, mode, frame: false, frameOrigin: null, ...extra });
+      };
+
+      let anchor = null;
+
+      // The pick answers only events the user really sent. A MouseEvent or KeyboardEvent the page
+      // dispatches carries the same coordinates and keys, so isTrusted is what separates a forged
+      // commit, highlight, and Escape from the user's own gestures.
+      const onMove = (e) => {
+        if (!e.isTrusted) return;
+        const el = document.elementFromPoint(e.clientX, e.clientY);
+        if (!el || el.closest("#opensidekick-overlay")) return;
+        if (mode === "element") {
+          const r = boxOf(el);
+          paint(ring, Math.round(r.x), Math.round(r.y), Math.round(r.w), Math.round(r.h));
+          hint.textContent = el.tagName.toLowerCase();
+          paint(hint, Math.round(r.x), Math.max(0, Math.round(r.y) - 28));
+        } else if (anchor) {
+          paint(marquee, Math.min(anchor.x, e.clientX), Math.min(anchor.y, e.clientY), Math.abs(e.clientX - anchor.x), Math.abs(e.clientY - anchor.y));
+        }
+      };
+
+      const onDown = (e) => {
+        if (!e.isTrusted) return;
+        // The drag belongs to the pick, so the page gets no text selection under it.
+        e.preventDefault();
+        anchor = { x: e.clientX, y: e.clientY };
+      };
+
+      const onClick = (e) => {
+        if (!e.isTrusted) return;
+        const el = document.elementFromPoint(e.clientX, e.clientY);
+        if (!el || el.closest("#opensidekick-overlay")) return;
+        // The click is the commit gesture, so the page's own handler for it never runs.
+        e.preventDefault();
+        e.stopPropagation();
+        const tag = el.tagName.toLowerCase();
+        const isFrame = tag === "iframe";
+        commit({
+          rect: boxOf(el),
+          name: tag,
+          frame: isFrame,
+          frameOrigin: isFrame ? frameOriginOf(el) : null,
+        });
+      };
+
+      const onUp = (e) => {
+        if (!e.isTrusted) return;
+        if (!anchor) return;
+        e.preventDefault();
+        e.stopPropagation();
+        const x = Math.min(anchor.x, e.clientX);
+        const y = Math.min(anchor.y, e.clientY);
+        const w = Math.abs(e.clientX - anchor.x);
+        const h = Math.abs(e.clientY - anchor.y);
+        anchor = null;
+        commit({ rect: { x, y, w, h } });
+      };
+
+      const onKey = (e) => {
+        if (!e.isTrusted) return;
+        if (e.key === "Escape") releasePick(state, { ok: false, mode, cancelled: true });
+      };
+
+      bind("mousemove", onMove);
+      bind("keydown", onKey);
+      if (mode === "element") bind("click", onClick);
+      else {
+        bind("mousedown", onDown);
+        bind("mouseup", onUp);
+      }
+    });
   }
 
   // -------------------------------------------------------------------------

@@ -11,6 +11,7 @@ import {
   HISTORY_NOTICE_KEY,
   SENSITIVE_NOTE,
   HISTORY_NOTICE,
+  CAPTURE_ROWS,
 } from "../common/constants.js";
 import {
   loadConfig,
@@ -37,6 +38,7 @@ import {
   emptyIndex,
 } from "./sessions.js";
 import { validateImages, canonicalType, taskFor, ATTACH_NOTES } from "../common/attachments.js";
+import { captureFromMode } from "./capture.js";
 import { resolveSource, isNoteworthyChange, featureEnabled, thresholdFor } from "./decisions.js";
 import { runAgent } from "./agent.js";
 import { detachAll } from "./cdp.js";
@@ -282,6 +284,13 @@ chrome.runtime.onInstalled.addListener(() => {
     title: "Summarize this page with OpenSidekick",
     contexts: ["page"],
   });
+  // A row with no id is no page-menu item, and a row's mode is a mode the capture accepts,
+  // so the menu cannot offer a row that answers with a refusal.
+  for (const row of CAPTURE_ROWS) {
+    if (row.id) {
+      chrome.contextMenus.create({ id: row.id, title: row.title, contexts: ["page"] });
+    }
+  }
   runMigrations();
   reconcileAlarms();
   withHistory(reconcileHistory).catch(() => {});
@@ -344,7 +353,25 @@ async function reconcileAlarms() {
   }
 }
 
-chrome.contextMenus.onClicked.addListener(async (info, tab) => {
+// The click's handling is one function so the bound listener and a driven click share a path.
+async function handleMenuClick(info, tab) {
+  const row = CAPTURE_ROWS.find((r) => r.id === info.menuItemId);
+  if (row) {
+    // The panel is opened on the tab the menu opened from, before the capture runs, so the note
+    // and the chip the user reads reach the panel that is showing that page; a click Chrome
+    // never saw as a gesture is refused by sidePanel.open, and the panel then comes from the icon.
+    if (tab && tab.id != null) {
+      try {
+        await chrome.sidePanel.open({ tabId: tab.id });
+      } catch {
+        /* user may need to click the icon */
+      }
+    }
+    const note = await captureFromMode(tab && tab.id, row.mode, emit);
+    emit({ kind: "note", text: note });
+    emit({ kind: "shot" });
+    return;
+  }
   let task = null;
   if (info.menuItemId === "ask-opensidekick" && info.selectionText) {
     task = `Regarding this selected text from the page:\n\n"""${info.selectionText}"""\n\nPlease help me with it.`;
@@ -362,7 +389,21 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   }
   // Nudge an already-open panel to pick up the seed.
   chrome.runtime.sendMessage({ type: MSG.AGENT_EVENT, kind: "seed", task }).catch(() => {});
-});
+}
+
+chrome.contextMenus.onClicked.addListener(handleMenuClick);
+// Chrome's native menu cannot be opened by automation, so the handler is exposed as the hook a
+// driven menu click goes through.
+globalThis.__menuClick = handleMenuClick;
+// A pick that never commits is released on a timeout; the hook runs a capture at a chosen
+// timeout, and lands the note the way the panel's send does, so the release and the note the user
+// reads are measured by a real pick rather than read off the rule.
+globalThis.__captureTimeout = (tabId, mode, ms) =>
+  captureFromMode(tabId, mode, emit, ms).then((note) => {
+    emit({ kind: "note", text: note });
+    emit({ kind: "shot" });
+    return note;
+  });
 
 // -------------------------------------------------------------------------
 // Messaging
@@ -389,6 +430,30 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       }
       handleRunTask(msg).then(sendResponse);
       return true;
+    }
+    case MSG.CAPTURE: {
+      // The same sender-origin door as RUN_TASK: a normal page has no chrome.runtime to send
+      // from, so the sender's origin is what separates the user's panel from a page.
+      if (new URL(sender.url || "about:blank").origin !== location.origin) {
+        sendResponse({ ok: false, error: "not-allowed" });
+        return false;
+      }
+      sendResponse({ ok: true });
+      // Answered at once, because a pick waits for the user and the panel cannot sit on an
+      // open reply that long; the note the capture ends on is the reply the user reads.
+      // A side panel is a tab of its own, so a send from the panel carries the tab the panel is
+      // docked to; when the sender's own tab is not a page, the window's active tab is the page
+      // the user is pointing at, and that is the tab the capture acts on.
+      const senderTab = sender.tab;
+      const pageTab = senderTab && /^https?:|^file:/i.test(senderTab.url || "") ? Promise.resolve(senderTab.id) : getActiveContentTabId();
+      pageTab
+        .then((tabId) => captureFromMode(tabId, msg.mode, emit))
+        .then((note) => {
+          emit({ kind: "note", text: note });
+          emit({ kind: "shot" });
+        })
+        .catch(() => {});
+      return false;
     }
     case MSG.NEW_CHAT: {
       loadLive()
@@ -631,7 +696,11 @@ async function handleRunTask(msg) {
     emit({ kind: "idle" });
     return { ok: false, error: "no-task" };
   }
-  conversation.push({ role: "user", content: task, ...(images.length ? { images } : {}) });
+  // The sites the user's captures came from sit beside the images. The panel sends the list it
+  // read off the captures it is sending, and the worker takes it as-is: the history scan reads it,
+  // and the provider converters read role/content/images, so this field never reaches the wire.
+  const shotUrls = Array.isArray(msg.shotUrls) ? msg.shotUrls : [];
+  conversation.push({ role: "user", content: task, ...(images.length ? { images } : {}), ...(shotUrls.length ? { shotUrls } : {}) });
   emit({ kind: "user_echo", text: task });
   // Captured now: New chat mid-run must not redirect this run's save.
   const runSession = session;

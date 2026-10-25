@@ -41,6 +41,7 @@ function cut(s, n) {
 }
 
 // Screenshots are large and only matter within the turn they were taken in.
+// The capture's origin stays: History records which site a picture came from, not its pixels.
 export function stripImages(messages) {
   return messages.map((m) =>
     m.images && m.images.length
@@ -59,6 +60,7 @@ export function visibleTurns(messages) {
   for (const m of messages) {
     if (!m || typeof m !== "object") continue;
     if (m.role === "user") {
+      // Written as words only, so a capture's origin stays in the hot copy and never in saved text.
       if (typeof m.content === "string" && m.content && !m.internal) {
         out.push({ role: "user", content: m.content });
       }
@@ -243,7 +245,12 @@ export function observedUrl(content) {
 export function touchesSensitiveSite(messages) {
   if (!Array.isArray(messages)) return false;
   return messages.some(
-    (m) => m && m.role === "tool" && SENSITIVE_SCAN_TOOLS.has(m.name) && isSensitive(observedUrl(m.content)),
+    (m) =>
+      m &&
+      ((m.role === "tool" && SENSITIVE_SCAN_TOOLS.has(m.name) && isSensitive(observedUrl(m.content))) ||
+        // A page the user photographed is a page this chat touched: the capture carries its
+        // origin, so a shot of a bank page is kept out of History exactly as the agent's own.
+        (m.role === "user" && Array.isArray(m.shotUrls) && m.shotUrls.some((u) => isSensitive(u)))),
   );
 }
 

@@ -20,6 +20,8 @@ import {
   relativeTime,
 } from "../src/background/sessions.js";
 import { SESSIONS_MAX } from "../src/common/constants.js";
+import { captureFromMode } from "../src/background/capture.js";
+import fs from "node:fs";
 
 let fail = 0;
 const ok = (c, m) => { console.log((c ? "ok  : " : "FAIL: ") + m); if (!c) fail = 1; };
@@ -56,6 +58,13 @@ const item = (id, updatedAt, extra = {}) => ({ id, title: "chat " + id, createdA
   // The words the user typed with a pasted image are kept; the image is not.
   ok(same(v, [user("Look at this"), user("pic"), asst("I see a chart.")]), "visibleTurns: keeps an attachment's text, drops internal turns");
   ok(v.every((m) => !m.images), "visibleTurns: no image reaches History");
+}
+{
+  // The user's own capture: the words are what they saw, the origin is not.
+  const v = visibleTurns([user("Describe the captured page.", { images: [{ mediaType: "image/png", data: "x" }], shotUrls: ["https://my.bank.test"] })]);
+  ok(same(v, [user("Describe the captured page.")]), `visibleTurns: the words of a capture turn are kept (got ${JSON.stringify(v)})`);
+  ok(v.every((m) => Object.keys(m).join() === "role,content") && !JSON.stringify(v).includes("bank.test"),
+    `visibleTurns: a capture's origin never reaches the saved text (keys ${JSON.stringify(v.map((m) => Object.keys(m)))}, saved ${JSON.stringify(v)})`);
 }
 {
   const v = visibleTurns([user("Do it"), asst("  ", { toolCalls: [{ name: "finish", args: { summary: "Typed it." } }] })]);
@@ -107,6 +116,13 @@ const item = (id, updatedAt, extra = {}) => ({ id, title: "chat " + id, createdA
   // nothing that comes out of stripImages has images, and the scan sees none.
   const out = stripImages([user("q"), user("pic", { images: [{ mediaType: "image/png", data: "x" }] }), asst("a")]);
   ok(out.every((m) => !m.images), "stripImages: no message survives with images, so a resumed chat has none to re-send");
+}
+{
+  // History records which site a picture came from, so the origin outlives the pixels.
+  const shot = user("pic", { images: [{ mediaType: "image/png", data: "x" }], shotUrls: ["https://my.bank.test"] });
+  const out = stripImages([shot]);
+  ok(out[0].images === undefined && out[0].content === "pic" && same(out[0].shotUrls, ["https://my.bank.test"]),
+    `stripImages: the picture is dropped and the capture's origin kept (images ${out[0].images}, content "${out[0].content}", shotUrls ${JSON.stringify(out[0].shotUrls)})`);
 }
 
 // --- capTurns ---
@@ -311,6 +327,13 @@ const save = (extra = {}) => planSave({
   ok(r.body.messages.every((m) => !m.images), "planSave: no image reaches the saved body");
 }
 {
+  // A capture turn goes to disk as the user's words: neither the pixels nor the page they came from.
+  const r = save({ conversation: [user("q"), user("Describe the captured page.", { images: [{ mediaType: "image/png", data: "x" }], shotUrls: ["https://shop.test"] }), asst("a")] });
+  const bodyJson = JSON.stringify(r.body);
+  ok(bodyJson.includes("Describe the captured page.") && r.body.messages.every((m) => !m.images && !m.shotUrls) && !bodyJson.includes("shop.test"),
+    `planSave: a capture turn is saved as the words, with no image and no origin recorded (body ${bodyJson.slice(0, 220)})`);
+}
+{
   const before = { v: 1, currentId: "s1", items: [item("s1", 5), item("b", 4)] };
   const r = save({ sensitive: true, index: before });
   ok(r.body === null && same(r.removeIds, ["s1"]) && same(r.index.items.map((i) => i.id), ["b"]) && r.index.currentId === null,
@@ -372,6 +395,65 @@ ok(touchesSensitiveSite([tool("run_javascript", { ok: true, url: BANK, result: '
   ];
   ok(touchesSensitiveSite(msgs) === false && touchesSensitiveSite(null) === false && touchesSensitiveSite("x") === false,
     "touchesSensitiveSite: ordinary sites, failed results and junk are false");
+}
+{
+  // The pages the user photographed, read off the origin a capture carries.
+  const BANK_ORIGIN = "https://my.bank.test";
+  const shot = user("q", { images: [{ mediaType: "image/png", data: "x" }], shotUrls: [BANK_ORIGIN] });
+  ok(touchesSensitiveSite([shot]) === true, `touchesSensitiveSite: a user capture of a bank origin (shotUrls ${JSON.stringify(shot.shotUrls)}, got ${touchesSensitiveSite([shot])})`);
+  // A shot of a frame inside an ordinary page names two sites, and the one inside the frame counts.
+  const framePair = user("q", { shotUrls: ["https://news.test", BANK_ORIGIN] });
+  ok(touchesSensitiveSite([framePair]) === true, `touchesSensitiveSite: a capture of a bank frame embedded on an ordinary page (shotUrls ${JSON.stringify(framePair.shotUrls)}, got ${touchesSensitiveSite([framePair])})`);
+  const toolShot = { role: "tool", toolCallId: "c1", name: "read_page", content: "{}", shotUrls: [BANK_ORIGIN] };
+  ok(touchesSensitiveSite([toolShot]) === false, `touchesSensitiveSite: shotUrls on a tool message counts nothing (shotUrls ${JSON.stringify(toolShot.shotUrls)}, got ${touchesSensitiveSite([toolShot])})`);
+  ok(touchesSensitiveSite([user("q", { shotUrls: ["https://shop.test"] })]) === false, "touchesSensitiveSite: a capture of an ordinary origin is false (got false, wanted false)");
+  const junk = [user("q"), user("q", { shotUrls: null }), user("q", { shotUrls: "https://my.bank.test" }), user("q", { shotUrls: [] }), user("q", { shotUrls: ["", null, 7, {}] })];
+  const junkRes = junk.map((m) => touchesSensitiveSite([m]));
+  ok(junkRes.every((b) => b === false), `touchesSensitiveSite: missing, null, non-array and unusable origins are false, never thrown (shotUrls ${JSON.stringify(junk.map((m) => m.shotUrls))}, results ${JSON.stringify(junkRes)})`);
+}
+
+// --- a capture against a full store ---
+// The capture path stubbed to the pieces the worker touches: a tab, a shot, a decoder, and a store
+// that says it is full. The row mirrors the history write that cannot make room: the shot is
+// dropped, the warning is said once, and the words the user reads name the drop.
+{
+  const png = fs.readFileSync(new URL("../icons/icon16.png", import.meta.url));
+  globalThis.chrome = {
+    storage: {
+      session: {
+        get: async (k) => ({ [k]: [] }),
+        set: async () => {
+          throw new Error("Resource::kQuotaBytes quota exceeded");
+        },
+      },
+    },
+    tabs: {
+      get: async () => ({ url: "https://shop.test/", windowId: 1 }),
+      sendMessage: async (_id, msg) => ({ ok: true, mode: msg.mode, rect: { x: 0, y: 0, w: 800, h: 600 }, name: "visible" }),
+      captureVisibleTab: async () => "data:image/png;base64," + png.toString("base64"),
+    },
+  };
+  globalThis.createImageBitmap = async () => ({ width: 800, height: 600, close() {} });
+  globalThis.OffscreenCanvas = class {
+    getContext() {
+      return { scale() {}, drawImage() {} };
+    }
+    convertToBlob() {
+      return { arrayBuffer: async () => Uint8Array.from(png).buffer };
+    }
+  };
+  const warns = [];
+  const emit = (e) => warns.push(e);
+  const first = await captureFromMode(1, "visible", emit);
+  const second = await captureFromMode(1, "visible", emit);
+  const warnCount = warns.filter((e) => e.kind === "warning").length;
+  ok(
+    [first, second].every((n) => !/^Captured /.test(n) && /storage is full/.test(n)) && warnCount === 1,
+    `quota drop: a full store drops the shot, warns once, and the returned words name the drop, never a capture (words ${JSON.stringify([first, second])}, warnings ${warnCount}, wanted one warning and words naming the drop)`
+  );
+  delete globalThis.chrome;
+  delete globalThis.createImageBitmap;
+  delete globalThis.OffscreenCanvas;
 }
 
 // --- relativeTime ---

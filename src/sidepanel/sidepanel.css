@@ -1554,6 +1554,14 @@ body {
   color: var(--os-accent-ink);
 }
 
+/* The camera rows open above the button that toggles them, so they sit over the composer
+   box: the placement is the composer's own, the rows are the site menu's buttons. */
+.capture-menu {
+  top: auto;
+  left: 12px;
+  right: auto;
+}
+
 .warn {
   color: var(--os-warn-ink);
 }

@@ -6,6 +6,18 @@ import { MSG } from "../common/constants.js";
 import { IMAGE_TYPES, acceptImage } from "../common/attachments.js";
 import { readConsole, readNetwork } from "./cdp.js";
 
+// bytes → base64 in slices: btoa over the whole buffer of a large capture throws,
+// so the conversion runs chunk by chunk.
+/** the bytes as a base64 string. */
+export function toBase64(bytes) {
+  let binary = "";
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+  }
+  return btoa(binary);
+}
+
 export const TOOL_DEFS = [
   {
     name: "read_page",
@@ -357,7 +369,9 @@ export async function ensureContentScript(tabId) {
   }
 }
 
-async function csSend(tabId, msg) {
+// One wording for a page the extension cannot reach: the capture path answers a failed
+// send with the same note a restricted page gets, so the two paths say the same thing.
+export async function csSend(tabId, msg) {
   await ensureContentScript(tabId);
   try {
     const res = await chrome.tabs.sendMessage(tabId, msg);
@@ -493,12 +507,7 @@ async function fetchDirectImage(url) {
     const mediaType = (blob.type || "").toLowerCase();
     if (!IMAGE_TYPES.has(mediaType)) return null;
     const buf = new Uint8Array(await blob.arrayBuffer());
-    let binary = "";
-    const chunk = 0x8000;
-    for (let i = 0; i < buf.length; i += chunk) {
-      binary += String.fromCharCode.apply(null, buf.subarray(i, i + chunk));
-    }
-    const data = btoa(binary);
+    const data = toBase64(buf);
     // The same size rule as every other image, so the cap lives in one place: a
     // payload past MAX_BASE64_CHARS is refused here and the tool falls back to a
     // screenshot.
